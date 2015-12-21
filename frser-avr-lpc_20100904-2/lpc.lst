@@ -1,0 +1,662 @@
+   1               		.file	"lpc.c"
+   2               	__SP_H__ = 0x3e
+   3               	__SP_L__ = 0x3d
+   4               	__SREG__ = 0x3f
+   5               	__tmp_reg__ = 0
+   6               	__zero_reg__ = 1
+   9               		.text
+  10               	.Ltext0:
+ 110               	.global	lpc_state_machine
+ 112               	lpc_state_machine:
+ 113               		.stabd	46,0,0
+   1:lpc.c         **** /*
+   2:lpc.c         ****  * This file is part of the frser-avr-lpc project.
+   3:lpc.c         ****  *
+   4:lpc.c         ****  * Copyright (C) 2010 Mike Stirling
+   5:lpc.c         ****  *
+   6:lpc.c         ****  * This program is free software; you can redistribute it and/or modify
+   7:lpc.c         ****  * it under the terms of the GNU General Public License as published by
+   8:lpc.c         ****  * the Free Software Foundation; either version 2 of the License, or
+   9:lpc.c         ****  * (at your option) any later version.
+  10:lpc.c         ****  *
+  11:lpc.c         ****  * This program is distributed in the hope that it will be useful,
+  12:lpc.c         ****  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  13:lpc.c         ****  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  14:lpc.c         ****  * GNU General Public License for more details.
+  15:lpc.c         ****  *
+  16:lpc.c         ****  * You should have received a copy of the GNU General Public License
+  17:lpc.c         ****  * along with this program; if not, write to the Free Software
+  18:lpc.c         ****  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
+  19:lpc.c         ****  * 
+  20:lpc.c         ****  * \file lpc.c
+  21:lpc.c         ****  * \brief LPC bus emulation state machine
+  22:lpc.c         ****  * 
+  23:lpc.c         ****  * \author	(C) 2010 Mike Stirling 
+  24:lpc.c         ****  * 			($Author$)
+  25:lpc.c         ****  * \version	$Revision$
+  26:lpc.c         ****  * \date	$Date$
+  27:lpc.c         ****  */
+  28:lpc.c         **** 
+  29:lpc.c         **** #include <stdint.h>
+  30:lpc.c         **** #include <avr/io.h>
+  31:lpc.c         **** 
+  32:lpc.c         **** #include "board.h"
+  33:lpc.c         **** #include "common.h"
+  34:lpc.c         **** 
+  35:lpc.c         **** typedef enum {
+  36:lpc.c         **** 	lpcReset = 0,
+  37:lpc.c         **** 	lpcResetWait,
+  38:lpc.c         **** 	lpcInit,
+  39:lpc.c         **** 	lpcInitWait,
+  40:lpc.c         **** 	lpcIdle,
+  41:lpc.c         **** 	lpcStart,
+  42:lpc.c         **** 	lpcCommand,
+  43:lpc.c         **** 	lpcAddress,
+  44:lpc.c         **** 	lpcDataOut,
+  45:lpc.c         **** 	lpcTARtoInput,
+  46:lpc.c         **** 	lpcSync,
+  47:lpc.c         **** 	lpcDataIn,
+  48:lpc.c         **** 	lpcTARtoOutput,
+  49:lpc.c         **** } lpc_state_t;
+  50:lpc.c         **** 
+  51:lpc.c         **** typedef struct {
+  52:lpc.c         **** 	lpc_state_t		state;
+  53:lpc.c         **** 	uint8_t			command;
+  54:lpc.c         **** 	uint32_t		address;
+  55:lpc.c         **** 	uint8_t			data;
+  56:lpc.c         **** 	uint8_t			count;
+  57:lpc.c         **** 	uint8_t			clock:1;
+  58:lpc.c         **** } lpc_t;
+  59:lpc.c         **** static lpc_t lpc;
+  60:lpc.c         **** 
+  61:lpc.c         **** #define LPC_MEMORY_READ		0x4
+  62:lpc.c         **** #define LPC_MEMORY_WRITE	0x6
+  63:lpc.c         **** 
+  64:lpc.c         **** #define LPC_RESET_COUNT		10
+  65:lpc.c         **** #define LPC_INIT_COUNT		10
+  66:lpc.c         **** 
+  67:lpc.c         **** void lpc_state_machine(void)
+  68:lpc.c         **** {	
+ 115               	.LM0:
+ 116               	.LFBB1:
+ 117               	/* prologue: function */
+ 118               	/* frame size = 0 */
+ 119               	/* stack size = 0 */
+ 120               	.L__stack_usage = 0
+  69:lpc.c         **** 	lpc.clock = !lpc.clock;
+ 122               	.LM1:
+ 123 0000 8091 0000 		lds r24,lpc+8
+ 124 0004 982F      		mov r25,r24
+ 125 0006 9095      		com r25
+ 126 0008 90FB      		bst r25,0
+ 127 000a 80F9      		bld r24,0
+ 128 000c 8093 0000 		sts lpc+8,r24
+  70:lpc.c         **** 	if (lpc.clock) {
+ 130               	.LM2:
+ 131 0010 80FF      		sbrs r24,0
+ 132 0012 00C0      		rjmp .L2
+  71:lpc.c         **** 		LPC_PORT |= _BV(LPC_CLK);
+ 134               	.LM3:
+ 135 0014 459A      		sbi 0x8,5
+ 136 0016 00C0      		rjmp .L3
+ 137               	.L2:
+  72:lpc.c         **** 	} else {
+  73:lpc.c         **** 		LPC_PORT &= ~_BV(LPC_CLK);
+ 139               	.LM4:
+ 140 0018 4598      		cbi 0x8,5
+ 141               	.L3:
+  74:lpc.c         **** 	}
+  75:lpc.c         **** 	
+  76:lpc.c         **** 	// Data changes occur on the falling clock edges
+  77:lpc.c         **** 	if (lpc.clock)
+ 143               	.LM5:
+ 144 001a 8091 0000 		lds r24,lpc+8
+ 145 001e 80FD      		sbrc r24,0
+ 146 0020 00C0      		rjmp .L1
+ 147               	.LBB4:
+ 148               	.LBB5:
+  78:lpc.c         **** 		return;
+  79:lpc.c         **** 	
+  80:lpc.c         **** 	switch (lpc.state) {
+ 150               	.LM6:
+ 151 0022 E091 0000 		lds r30,lpc
+ 152 0026 8E2F      		mov r24,r30
+ 153 0028 90E0      		ldi r25,0
+ 154 002a 8D30      		cpi r24,13
+ 155 002c 9105      		cpc r25,__zero_reg__
+ 156 002e 00F0      		brlo .+2
+ 157 0030 00C0      		rjmp .L1
+ 158 0032 FC01      		movw r30,r24
+ 159 0034 E050      		subi r30,lo8(-(gs(.L7)))
+ 160 0036 F040      		sbci r31,hi8(-(gs(.L7)))
+ 161 0038 0C94 0000 		jmp __tablejump2__
+ 162               		.section	.progmem.gcc_sw_table,"a",@progbits
+ 163               		.p2align	1
+ 164               	.L7:
+ 165 0000 0000      		.word gs(.L6)
+ 166 0002 0000      		.word gs(.L8)
+ 167 0004 0000      		.word gs(.L9)
+ 168 0006 0000      		.word gs(.L10)
+ 169 0008 0000      		.word gs(.L11)
+ 170 000a 0000      		.word gs(.L12)
+ 171 000c 0000      		.word gs(.L13)
+ 172 000e 0000      		.word gs(.L14)
+ 173 0010 0000      		.word gs(.L15)
+ 174 0012 0000      		.word gs(.L16)
+ 175 0014 0000      		.word gs(.L17)
+ 176 0016 0000      		.word gs(.L18)
+ 177 0018 0000      		.word gs(.L19)
+ 178               		.text
+ 179               	.L6:
+  81:lpc.c         **** 	case lpcReset:
+  82:lpc.c         **** 		TRACE("LPC reset started\n");
+  83:lpc.c         **** 		LPC_RESET_PORT &= ~_BV(LPC_nRESET);
+ 181               	.LM7:
+ 182 003c 2A98      		cbi 0x5,2
+  84:lpc.c         **** 		LPC_DDR |= 0xf;
+ 184               	.LM8:
+ 185 003e 87B1      		in r24,0x7
+ 186 0040 8F60      		ori r24,lo8(15)
+ 187 0042 87B9      		out 0x7,r24
+  85:lpc.c         **** 		LPC_PORT &= ~0xff;
+ 189               	.LM9:
+ 190 0044 88B1      		in r24,0x8
+ 191 0046 18B8      		out 0x8,__zero_reg__
+  86:lpc.c         **** 		LPC_PORT |= _BV(LPC_nLFRAM);
+ 193               	.LM10:
+ 194 0048 449A      		sbi 0x8,4
+  87:lpc.c         **** 		lpc.count = LPC_RESET_COUNT;
+ 196               	.LM11:
+ 197 004a 8AE0      		ldi r24,lo8(10)
+ 198 004c 8093 0000 		sts lpc+7,r24
+  88:lpc.c         **** 		lpc.state = lpcResetWait;
+ 200               	.LM12:
+ 201 0050 81E0      		ldi r24,lo8(1)
+ 202 0052 00C0      		rjmp .L32
+ 203               	.L8:
+  89:lpc.c         **** 		break;
+  90:lpc.c         **** 	case lpcResetWait:
+  91:lpc.c         **** 		lpc.count--;
+ 205               	.LM13:
+ 206 0054 8091 0000 		lds r24,lpc+7
+ 207 0058 8150      		subi r24,lo8(-(-1))
+ 208 005a 8093 0000 		sts lpc+7,r24
+  92:lpc.c         **** 		if (lpc.count == 0)
+ 210               	.LM14:
+ 211 005e 8111      		cpse r24,__zero_reg__
+ 212 0060 00C0      		rjmp .L1
+  93:lpc.c         **** 			lpc.state = lpcInit;
+ 214               	.LM15:
+ 215 0062 82E0      		ldi r24,lo8(2)
+ 216 0064 00C0      		rjmp .L32
+ 217               	.L9:
+  94:lpc.c         **** 		break;
+  95:lpc.c         **** 	case lpcInit:
+  96:lpc.c         **** 		LPC_RESET_PORT |= _BV(LPC_nRESET);
+ 219               	.LM16:
+ 220 0066 2A9A      		sbi 0x5,2
+  97:lpc.c         **** 		lpc.count = LPC_INIT_COUNT;
+ 222               	.LM17:
+ 223 0068 8AE0      		ldi r24,lo8(10)
+ 224 006a 8093 0000 		sts lpc+7,r24
+  98:lpc.c         **** 		lpc.state = lpcInitWait;
+ 226               	.LM18:
+ 227 006e 83E0      		ldi r24,lo8(3)
+ 228 0070 00C0      		rjmp .L32
+ 229               	.L10:
+  99:lpc.c         **** 		break;
+ 100:lpc.c         **** 	case lpcInitWait:
+ 101:lpc.c         **** 		lpc.count--;
+ 231               	.LM19:
+ 232 0072 8091 0000 		lds r24,lpc+7
+ 233 0076 8150      		subi r24,lo8(-(-1))
+ 234 0078 8093 0000 		sts lpc+7,r24
+ 102:lpc.c         **** 		if (lpc.count == 0) {
+ 236               	.LM20:
+ 237 007c 8111      		cpse r24,__zero_reg__
+ 238 007e 00C0      		rjmp .L11
+ 103:lpc.c         **** 			TRACE("LPC reset complete\n");
+ 104:lpc.c         **** 			lpc.state = lpcIdle;
+ 240               	.LM21:
+ 241 0080 84E0      		ldi r24,lo8(4)
+ 242 0082 8093 0000 		sts lpc,r24
+ 243               	.L11:
+ 105:lpc.c         **** 		}
+ 106:lpc.c         **** 			
+ 107:lpc.c         **** 	case lpcIdle:
+ 108:lpc.c         **** 		LPC_PORT &= ~0xf;
+ 245               	.LM22:
+ 246 0086 88B1      		in r24,0x8
+ 247 0088 807F      		andi r24,lo8(-16)
+ 248 008a 88B9      		out 0x8,r24
+ 109:lpc.c         **** 		LPC_PORT |= _BV(LPC_nLFRAM);
+ 250               	.LM23:
+ 251 008c 449A      		sbi 0x8,4
+ 252 008e 0895      		ret
+ 253               	.L12:
+ 110:lpc.c         **** 		break;
+ 111:lpc.c         **** 	case lpcStart:
+ 112:lpc.c         **** 		TRACE("LPC transaction starting\n");
+ 113:lpc.c         **** 		LPC_PORT &= ~0xf;
+ 255               	.LM24:
+ 256 0090 88B1      		in r24,0x8
+ 257 0092 807F      		andi r24,lo8(-16)
+ 258 0094 88B9      		out 0x8,r24
+ 114:lpc.c         **** 		LPC_PORT &= ~_BV(LPC_nLFRAM);
+ 260               	.LM25:
+ 261 0096 4498      		cbi 0x8,4
+ 115:lpc.c         **** 		lpc.state = lpcCommand;
+ 263               	.LM26:
+ 264 0098 86E0      		ldi r24,lo8(6)
+ 265 009a 00C0      		rjmp .L32
+ 266               	.L13:
+ 116:lpc.c         **** 		break;
+ 117:lpc.c         **** 	case lpcCommand:
+ 118:lpc.c         **** 		//TRACE("Command = %x\n",lpc.command);
+ 119:lpc.c         **** 		LPC_PORT = (LPC_PORT & ~0xf) | (lpc.command & 0xf);
+ 268               	.LM27:
+ 269 009c 88B1      		in r24,0x8
+ 270 009e 9091 0000 		lds r25,lpc+1
+ 271 00a2 9F70      		andi r25,lo8(15)
+ 272 00a4 807F      		andi r24,lo8(-16)
+ 273 00a6 892B      		or r24,r25
+ 274 00a8 88B9      		out 0x8,r24
+ 120:lpc.c         **** 		LPC_PORT |= _BV(LPC_nLFRAM);
+ 276               	.LM28:
+ 277 00aa 449A      		sbi 0x8,4
+ 121:lpc.c         **** 		lpc.state = lpcAddress;
+ 279               	.LM29:
+ 280 00ac 87E0      		ldi r24,lo8(7)
+ 281 00ae 8093 0000 		sts lpc,r24
+ 122:lpc.c         **** 		lpc.count = 8; // address clocked out over 8 cycles
+ 283               	.LM30:
+ 284 00b2 88E0      		ldi r24,lo8(8)
+ 285 00b4 00C0      		rjmp .L35
+ 286               	.L14:
+ 123:lpc.c         **** 		break;
+ 124:lpc.c         **** 	case lpcAddress:
+ 125:lpc.c         **** 		//TRACE("Address byte = %x\n",lpc.address >> 28);
+ 126:lpc.c         **** 		LPC_PORT = (LPC_PORT & ~0xf) | (lpc.address >> 28);
+ 288               	.LM31:
+ 289 00b6 28B1      		in r18,0x8
+ 290 00b8 8091 0000 		lds r24,lpc+2
+ 291 00bc 9091 0000 		lds r25,lpc+2+1
+ 292 00c0 A091 0000 		lds r26,lpc+2+2
+ 293 00c4 B091 0000 		lds r27,lpc+2+3
+ 294 00c8 AC01      		movw r20,r24
+ 295 00ca BD01      		movw r22,r26
+ 296 00cc 3CE1      		ldi r19,28
+ 297               		1:
+ 298 00ce 7695      		lsr r23
+ 299 00d0 6795      		ror r22
+ 300 00d2 5795      		ror r21
+ 301 00d4 4795      		ror r20
+ 302 00d6 3A95      		dec r19
+ 303 00d8 01F4      		brne 1b
+ 304 00da 207F      		andi r18,lo8(-16)
+ 305 00dc 422B      		or r20,r18
+ 306 00de 48B9      		out 0x8,r20
+ 127:lpc.c         **** 		lpc.address <<= 4;
+ 308               	.LM32:
+ 309 00e0 44E0      		ldi r20,4
+ 310               		1:
+ 311 00e2 880F      		lsl r24
+ 312 00e4 991F      		rol r25
+ 313 00e6 AA1F      		rol r26
+ 314 00e8 BB1F      		rol r27
+ 315 00ea 4A95      		dec r20
+ 316 00ec 01F4      		brne 1b
+ 317 00ee 8093 0000 		sts lpc+2,r24
+ 318 00f2 9093 0000 		sts lpc+2+1,r25
+ 319 00f6 A093 0000 		sts lpc+2+2,r26
+ 320 00fa B093 0000 		sts lpc+2+3,r27
+ 128:lpc.c         **** 		lpc.count--;
+ 322               	.LM33:
+ 323 00fe 8091 0000 		lds r24,lpc+7
+ 324 0102 8150      		subi r24,lo8(-(-1))
+ 325 0104 8093 0000 		sts lpc+7,r24
+ 129:lpc.c         **** 		if (lpc.count == 0) {
+ 327               	.LM34:
+ 328 0108 8111      		cpse r24,__zero_reg__
+ 329 010a 00C0      		rjmp .L1
+ 130:lpc.c         **** 			lpc.state = (lpc.command == LPC_MEMORY_READ) ? lpcTARtoInput : lpcDataOut;
+ 331               	.LM35:
+ 332 010c 8091 0000 		lds r24,lpc+1
+ 333 0110 8430      		cpi r24,lo8(4)
+ 334 0112 01F0      		breq .L36
+ 335 0114 88E0      		ldi r24,lo8(8)
+ 336 0116 00C0      		rjmp .L33
+ 337               	.L15:
+ 131:lpc.c         **** 			lpc.count = 2;
+ 132:lpc.c         **** 		}
+ 133:lpc.c         **** 		break;
+ 134:lpc.c         **** 	case lpcDataOut:
+ 135:lpc.c         **** 		LPC_PORT = (LPC_PORT & ~0xf) | (lpc.data & 0xf);
+ 339               	.LM36:
+ 340 0118 88B1      		in r24,0x8
+ 341 011a 9091 0000 		lds r25,lpc+6
+ 342 011e 292F      		mov r18,r25
+ 343 0120 2F70      		andi r18,lo8(15)
+ 344 0122 807F      		andi r24,lo8(-16)
+ 345 0124 822B      		or r24,r18
+ 346 0126 88B9      		out 0x8,r24
+ 136:lpc.c         **** 		lpc.data >>= 4;
+ 348               	.LM37:
+ 349 0128 9295      		swap r25
+ 350 012a 9F70      		andi r25,lo8(15)
+ 351 012c 9093 0000 		sts lpc+6,r25
+ 137:lpc.c         **** 		//TRACE("Data out = %x\n",LPC_PORT & 0xf);
+ 138:lpc.c         **** 		lpc.count--;
+ 353               	.LM38:
+ 354 0130 8091 0000 		lds r24,lpc+7
+ 355 0134 8150      		subi r24,lo8(-(-1))
+ 356 0136 8093 0000 		sts lpc+7,r24
+ 139:lpc.c         **** 		if (lpc.count == 0) {
+ 358               	.LM39:
+ 359 013a 8111      		cpse r24,__zero_reg__
+ 360 013c 00C0      		rjmp .L1
+ 361               	.L36:
+ 140:lpc.c         **** 			lpc.state = lpcTARtoInput;
+ 363               	.LM40:
+ 364 013e 89E0      		ldi r24,lo8(9)
+ 365 0140 00C0      		rjmp .L33
+ 366               	.L16:
+ 141:lpc.c         **** 			lpc.count = 2;
+ 142:lpc.c         **** 		}
+ 143:lpc.c         **** 		break;
+ 144:lpc.c         **** 	case lpcTARtoInput:
+ 145:lpc.c         **** 		LPC_PORT |= 0xf;
+ 368               	.LM41:
+ 369 0142 88B1      		in r24,0x8
+ 370 0144 8F60      		ori r24,lo8(15)
+ 371 0146 88B9      		out 0x8,r24
+ 146:lpc.c         **** 		lpc.count--;
+ 373               	.LM42:
+ 374 0148 8091 0000 		lds r24,lpc+7
+ 375 014c 8150      		subi r24,lo8(-(-1))
+ 376 014e 8093 0000 		sts lpc+7,r24
+ 147:lpc.c         **** 		if (lpc.count == 1)
+ 378               	.LM43:
+ 379 0152 8130      		cpi r24,lo8(1)
+ 380 0154 01F4      		brne .L22
+ 148:lpc.c         **** 			LPC_DDR &= ~0xf; // tri-state data bus
+ 382               	.LM44:
+ 383 0156 87B1      		in r24,0x7
+ 384 0158 807F      		andi r24,lo8(-16)
+ 385 015a 87B9      		out 0x7,r24
+ 386               	.L22:
+ 149:lpc.c         **** 		if (lpc.count == 0)
+ 388               	.LM45:
+ 389 015c 8091 0000 		lds r24,lpc+7
+ 390 0160 8111      		cpse r24,__zero_reg__
+ 391 0162 00C0      		rjmp .L1
+ 150:lpc.c         **** 			lpc.state = lpcSync;
+ 393               	.LM46:
+ 394 0164 8AE0      		ldi r24,lo8(10)
+ 395 0166 00C0      		rjmp .L32
+ 396               	.L17:
+ 151:lpc.c         **** 		break;
+ 152:lpc.c         **** 	case lpcSync:
+ 153:lpc.c         **** 		if ((LPC_PIN & 0xf) == 5) {
+ 398               	.LM47:
+ 399 0168 86B1      		in r24,0x6
+ 400 016a 8F70      		andi r24,lo8(15)
+ 401 016c 8530      		cpi r24,lo8(5)
+ 402 016e 01F0      		breq .L1
+ 154:lpc.c         **** 			TRACE("Device inserted wait state\n");
+ 155:lpc.c         **** 			break;
+ 156:lpc.c         **** 		}
+ 157:lpc.c         **** 		if ((LPC_PIN & 0xf) != 0) {
+ 404               	.LM48:
+ 405 0170 86B1      		in r24,0x6
+ 406 0172 8F70      		andi r24,lo8(15)
+ 407 0174 01F4      		brne .L34
+ 158:lpc.c         **** 			ERROR("Bad sync word received 0x%x != 0\n",LPC_PIN & 0xf);
+ 159:lpc.c         **** 			lpc.state = lpcTARtoOutput; // must restore port to output mode
+ 160:lpc.c         **** 			lpc.count = 2;
+ 161:lpc.c         **** 			break;
+ 162:lpc.c         **** 		}
+ 163:lpc.c         **** 		lpc.state = (lpc.command == LPC_MEMORY_READ) ? lpcDataIn : lpcTARtoOutput;
+ 409               	.LM49:
+ 410 0176 8091 0000 		lds r24,lpc+1
+ 411 017a 8430      		cpi r24,lo8(4)
+ 412 017c 01F4      		brne .L34
+ 413 017e 8BE0      		ldi r24,lo8(11)
+ 414 0180 00C0      		rjmp .L33
+ 415               	.L18:
+ 164:lpc.c         **** 		lpc.count = 2; // 2 nibbles
+ 165:lpc.c         **** 		break;
+ 166:lpc.c         **** 	case lpcDataIn:
+ 167:lpc.c         **** 		//TRACE("Data in = %x\n",LPC_PIN & 0xf);
+ 168:lpc.c         **** 		lpc.count--;
+ 417               	.LM50:
+ 418 0182 8091 0000 		lds r24,lpc+7
+ 419 0186 8150      		subi r24,lo8(-(-1))
+ 420 0188 8093 0000 		sts lpc+7,r24
+ 169:lpc.c         **** 		if (lpc.count == 1)
+ 422               	.LM51:
+ 423 018c 8130      		cpi r24,lo8(1)
+ 424 018e 01F4      		brne .L25
+ 170:lpc.c         **** 			lpc.data = LPC_PIN & 0xf;
+ 426               	.LM52:
+ 427 0190 86B1      		in r24,0x6
+ 428 0192 8F70      		andi r24,lo8(15)
+ 429 0194 8093 0000 		sts lpc+6,r24
+ 430 0198 0895      		ret
+ 431               	.L25:
+ 171:lpc.c         **** 		if (lpc.count == 0) {
+ 433               	.LM53:
+ 434 019a 8111      		cpse r24,__zero_reg__
+ 435 019c 00C0      		rjmp .L1
+ 172:lpc.c         **** 			lpc.data |= (LPC_PIN & 0xf) << 4;
+ 437               	.LM54:
+ 438 019e 86B1      		in r24,0x6
+ 439 01a0 20E1      		ldi r18,lo8(16)
+ 440 01a2 829F      		mul r24,r18
+ 441 01a4 C001      		movw r24,r0
+ 442 01a6 1124      		clr __zero_reg__
+ 443 01a8 9091 0000 		lds r25,lpc+6
+ 444 01ac 892B      		or r24,r25
+ 445 01ae 8093 0000 		sts lpc+6,r24
+ 446               	.L34:
+ 173:lpc.c         **** 			lpc.state = lpcTARtoOutput;
+ 448               	.LM55:
+ 449 01b2 8CE0      		ldi r24,lo8(12)
+ 450               	.L33:
+ 451 01b4 8093 0000 		sts lpc,r24
+ 174:lpc.c         **** 			lpc.count = 2;
+ 453               	.LM56:
+ 454 01b8 82E0      		ldi r24,lo8(2)
+ 455               	.L35:
+ 456 01ba 8093 0000 		sts lpc+7,r24
+ 457 01be 0895      		ret
+ 458               	.L19:
+ 175:lpc.c         **** 		}
+ 176:lpc.c         **** 		break;
+ 177:lpc.c         **** 	case lpcTARtoOutput:
+ 178:lpc.c         **** 		LPC_PORT |= 0xf;
+ 460               	.LM57:
+ 461 01c0 88B1      		in r24,0x8
+ 462 01c2 8F60      		ori r24,lo8(15)
+ 463 01c4 88B9      		out 0x8,r24
+ 179:lpc.c         **** 		lpc.count--;
+ 465               	.LM58:
+ 466 01c6 8091 0000 		lds r24,lpc+7
+ 467 01ca 8150      		subi r24,lo8(-(-1))
+ 468 01cc 8093 0000 		sts lpc+7,r24
+ 180:lpc.c         **** 		if (lpc.count == 1)
+ 470               	.LM59:
+ 471 01d0 8130      		cpi r24,lo8(1)
+ 472 01d2 01F4      		brne .L26
+ 181:lpc.c         **** 			LPC_DDR |= 0xf; // bus to output
+ 474               	.LM60:
+ 475 01d4 87B1      		in r24,0x7
+ 476 01d6 8F60      		ori r24,lo8(15)
+ 477 01d8 87B9      		out 0x7,r24
+ 478               	.L26:
+ 182:lpc.c         **** 		if (lpc.count == 0)
+ 480               	.LM61:
+ 481 01da 8091 0000 		lds r24,lpc+7
+ 482 01de 8111      		cpse r24,__zero_reg__
+ 483 01e0 00C0      		rjmp .L1
+ 183:lpc.c         **** 			lpc.state = lpcIdle;
+ 485               	.LM62:
+ 486 01e2 84E0      		ldi r24,lo8(4)
+ 487               	.L32:
+ 488 01e4 8093 0000 		sts lpc,r24
+ 489               	.L1:
+ 490 01e8 0895      		ret
+ 491               	.LBE5:
+ 492               	.LBE4:
+ 494               	.Lscope1:
+ 496               		.stabd	78,0,0
+ 498               	.global	lpc_reset
+ 500               	lpc_reset:
+ 501               		.stabd	46,0,0
+ 184:lpc.c         **** 		break;
+ 185:lpc.c         **** 	default:
+ 186:lpc.c         **** 		ERROR("Bad state\n");
+ 187:lpc.c         **** 	}
+ 188:lpc.c         **** 	
+ 189:lpc.c         **** 	TRACE("nRESET = %d nLFRAM=%d LAD=%X\n",(LPC_RESET_PORT & _BV(LPC_nRESET)) ?  1 : 0,(LPC_PORT & _BV
+ 190:lpc.c         **** }
+ 191:lpc.c         **** 
+ 192:lpc.c         **** void lpc_reset(void)
+ 193:lpc.c         **** {
+ 503               	.LM63:
+ 504               	.LFBB2:
+ 505               	/* prologue: function */
+ 506               	/* frame size = 0 */
+ 507               	/* stack size = 0 */
+ 508               	.L__stack_usage = 0
+ 194:lpc.c         **** 	lpc.state = lpcReset;
+ 510               	.LM64:
+ 511 01ea 1092 0000 		sts lpc,__zero_reg__
+ 512               	.L39:
+ 195:lpc.c         **** 	while (lpc.state != lpcIdle)
+ 514               	.LM65:
+ 515 01ee 8091 0000 		lds r24,lpc
+ 516 01f2 8430      		cpi r24,lo8(4)
+ 517 01f4 01F0      		breq .L41
+ 196:lpc.c         **** 		lpc_state_machine();
+ 519               	.LM66:
+ 520 01f6 0E94 0000 		call lpc_state_machine
+ 521 01fa 00C0      		rjmp .L39
+ 522               	.L41:
+ 523               	/* epilogue start */
+ 197:lpc.c         **** }
+ 525               	.LM67:
+ 526 01fc 0895      		ret
+ 528               	.Lscope2:
+ 530               		.stabd	78,0,0
+ 533               	.global	lpc_read
+ 535               	lpc_read:
+ 536               		.stabd	46,0,0
+ 198:lpc.c         **** 
+ 199:lpc.c         **** uint8_t lpc_read(uint32_t address)
+ 200:lpc.c         **** {
+ 538               	.LM68:
+ 539               	.LFBB3:
+ 540               	/* prologue: function */
+ 541               	/* frame size = 0 */
+ 542               	/* stack size = 0 */
+ 543               	.L__stack_usage = 0
+ 201:lpc.c         **** 	lpc.command = LPC_MEMORY_READ;
+ 545               	.LM69:
+ 546 01fe 24E0      		ldi r18,lo8(4)
+ 547 0200 2093 0000 		sts lpc+1,r18
+ 202:lpc.c         **** 	lpc.address = address;
+ 549               	.LM70:
+ 550 0204 6093 0000 		sts lpc+2,r22
+ 551 0208 7093 0000 		sts lpc+2+1,r23
+ 552 020c 8093 0000 		sts lpc+2+2,r24
+ 553 0210 9093 0000 		sts lpc+2+3,r25
+ 203:lpc.c         **** 	lpc.state = lpcStart;
+ 555               	.LM71:
+ 556 0214 85E0      		ldi r24,lo8(5)
+ 557 0216 8093 0000 		sts lpc,r24
+ 558               	.L43:
+ 204:lpc.c         **** 	while (lpc.state != lpcIdle)
+ 560               	.LM72:
+ 561 021a 8091 0000 		lds r24,lpc
+ 562 021e 8430      		cpi r24,lo8(4)
+ 563 0220 01F0      		breq .L45
+ 205:lpc.c         **** 		lpc_state_machine();
+ 565               	.LM73:
+ 566 0222 0E94 0000 		call lpc_state_machine
+ 567 0226 00C0      		rjmp .L43
+ 568               	.L45:
+ 206:lpc.c         **** 	return lpc.data;
+ 207:lpc.c         **** }
+ 570               	.LM74:
+ 571 0228 8091 0000 		lds r24,lpc+6
+ 572 022c 0895      		ret
+ 574               	.Lscope3:
+ 576               		.stabd	78,0,0
+ 580               	.global	lpc_write
+ 582               	lpc_write:
+ 583               		.stabd	46,0,0
+ 208:lpc.c         **** 
+ 209:lpc.c         **** void lpc_write(uint32_t address,uint8_t data)
+ 210:lpc.c         **** {
+ 585               	.LM75:
+ 586               	.LFBB4:
+ 587               	/* prologue: function */
+ 588               	/* frame size = 0 */
+ 589               	/* stack size = 0 */
+ 590               	.L__stack_usage = 0
+ 211:lpc.c         **** 	lpc.command = LPC_MEMORY_WRITE;
+ 592               	.LM76:
+ 593 022e 26E0      		ldi r18,lo8(6)
+ 594 0230 2093 0000 		sts lpc+1,r18
+ 212:lpc.c         **** 	lpc.address = address;
+ 596               	.LM77:
+ 597 0234 6093 0000 		sts lpc+2,r22
+ 598 0238 7093 0000 		sts lpc+2+1,r23
+ 599 023c 8093 0000 		sts lpc+2+2,r24
+ 600 0240 9093 0000 		sts lpc+2+3,r25
+ 213:lpc.c         **** 	lpc.data = data;
+ 602               	.LM78:
+ 603 0244 4093 0000 		sts lpc+6,r20
+ 214:lpc.c         **** 	lpc.state = lpcStart;
+ 605               	.LM79:
+ 606 0248 85E0      		ldi r24,lo8(5)
+ 607 024a 8093 0000 		sts lpc,r24
+ 608               	.L47:
+ 215:lpc.c         **** 	while (lpc.state != lpcIdle)
+ 610               	.LM80:
+ 611 024e 8091 0000 		lds r24,lpc
+ 612 0252 8430      		cpi r24,lo8(4)
+ 613 0254 01F0      		breq .L49
+ 216:lpc.c         **** 		lpc_state_machine();	
+ 615               	.LM81:
+ 616 0256 0E94 0000 		call lpc_state_machine
+ 617 025a 00C0      		rjmp .L47
+ 618               	.L49:
+ 619               	/* epilogue start */
+ 217:lpc.c         **** }
+ 621               	.LM82:
+ 622 025c 0895      		ret
+ 624               	.Lscope4:
+ 626               		.stabd	78,0,0
+ 627               		.local	lpc
+ 628               		.comm	lpc,9,1
+ 631               	.Letext0:
+ 632               		.ident	"GCC: (GNU) 4.9.2"
+ 633               	.global __do_clear_bss
+DEFINED SYMBOLS
+                            *ABS*:0000000000000000 lpc.c
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccddbrik.s:2      *ABS*:000000000000003e __SP_H__
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccddbrik.s:3      *ABS*:000000000000003d __SP_L__
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccddbrik.s:4      *ABS*:000000000000003f __SREG__
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccddbrik.s:5      *ABS*:0000000000000000 __tmp_reg__
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccddbrik.s:6      *ABS*:0000000000000001 __zero_reg__
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccddbrik.s:112    .text:0000000000000000 lpc_state_machine
+                             .bss:0000000000000000 lpc
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccddbrik.s:500    .text:00000000000001ea lpc_reset
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccddbrik.s:535    .text:00000000000001fe lpc_read
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccddbrik.s:582    .text:000000000000022e lpc_write
+
+UNDEFINED SYMBOLS
+__tablejump2__
+__do_clear_bss

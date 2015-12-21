@@ -1,0 +1,1382 @@
+   1               		.file	"frser.c"
+   2               	__SP_H__ = 0x3e
+   3               	__SP_L__ = 0x3d
+   4               	__SREG__ = 0x3f
+   5               	__tmp_reg__ = 0
+   6               	__zero_reg__ = 1
+   9               		.text
+  10               	.Ltext0:
+ 109               	opbuf_addbyte:
+ 110               		.stabd	46,0,0
+   1:frser.c       **** /*
+   2:frser.c       ****  * This file is part of the frser-avr project.
+   3:frser.c       ****  *
+   4:frser.c       ****  * Copyright (C) 2009 Urja Rannikko <urjaman@gmail.com>
+   5:frser.c       ****  * Modified 2010 Mike Stirling
+   6:frser.c       ****  * 
+   7:frser.c       ****  * This program is free software; you can redistribute it and/or modify
+   8:frser.c       ****  * it under the terms of the GNU General Public License as published by
+   9:frser.c       ****  * the Free Software Foundation; either version 2 of the License, or
+  10:frser.c       ****  * (at your option) any later version.
+  11:frser.c       ****  *
+  12:frser.c       ****  * This program is distributed in the hope that it will be useful,
+  13:frser.c       ****  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  14:frser.c       ****  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  15:frser.c       ****  * GNU General Public License for more details.
+  16:frser.c       ****  *
+  17:frser.c       ****  * You should have received a copy of the GNU General Public License
+  18:frser.c       ****  * along with this program; if not, write to the Free Software
+  19:frser.c       ****  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
+  20:frser.c       ****  */
+  21:frser.c       **** 
+  22:frser.c       **** #include <avr/io.h>
+  23:frser.c       **** #include <util/delay.h>
+  24:frser.c       **** 
+  25:frser.c       **** #include "board.h"
+  26:frser.c       **** #include "common.h"
+  27:frser.c       **** #include "lpc.h"
+  28:frser.c       **** #include "uart.h"
+  29:frser.c       **** 
+  30:frser.c       **** /* Flashrom serial interface AVR implementation */
+  31:frser.c       **** 
+  32:frser.c       **** 
+  33:frser.c       **** const char pgmname[16] = "ATMega88 LPC   ";
+  34:frser.c       **** 
+  35:frser.c       **** /* The length of the operation buffer */
+  36:frser.c       **** #define S_OPBUFLEN 	200
+  37:frser.c       **** /* The maximum static length of parameters (read n) */
+  38:frser.c       **** #define S_MAXLEN 	0x06
+  39:frser.c       **** 
+  40:frser.c       **** static unsigned char opbuf[S_OPBUFLEN];
+  41:frser.c       **** static unsigned int opbuf_bytes = 0;
+  42:frser.c       **** 
+  43:frser.c       **** #define S_ACK 0x06
+  44:frser.c       **** #define S_NAK 0x15
+  45:frser.c       **** #define S_CMD_NOP               0x00            /* No operation                                 */
+  46:frser.c       **** #define S_CMD_Q_IFACE           0x01            /* Query interface version                      */
+  47:frser.c       **** #define S_CMD_Q_CMDMAP          0x02            /* Query supported commands bitmap              */
+  48:frser.c       **** #define S_CMD_Q_PGMNAME         0x03            /* Query programmer name                        */
+  49:frser.c       **** #define S_CMD_Q_SERBUF          0x04            /* Query Serial Buffer Size                     */
+  50:frser.c       **** #define S_CMD_Q_BUSTYPE         0x05            /* Query supported bustypes                     */
+  51:frser.c       **** #define S_CMD_Q_CHIPSIZE        0x06            /* Query supported chipsize (2^n format)        */
+  52:frser.c       **** #define S_CMD_Q_OPBUF           0x07            /* Query operation buffer size                  */
+  53:frser.c       **** #define S_CMD_Q_WRNMAXLEN       0x08            /* Query Write to opbuf: Write-N maximum lenght */
+  54:frser.c       **** #define S_CMD_R_BYTE            0x09            /* Read a single byte                           */
+  55:frser.c       **** #define S_CMD_R_NBYTES          0x0A            /* Read n bytes                                 */
+  56:frser.c       **** #define S_CMD_O_INIT            0x0B            /* Initialize operation buffer                  */
+  57:frser.c       **** #define S_CMD_O_WRITEB          0x0C            /* Write opbuf: Write byte with address         */
+  58:frser.c       **** #define S_CMD_O_WRITEN          0x0D            /* Write to opbuf: Write-N                      */
+  59:frser.c       **** #define S_CMD_O_DELAY           0x0E            /* Write opbuf: udelay                          */
+  60:frser.c       **** #define S_CMD_O_EXEC            0x0F            /* Execute operation buffer                     */
+  61:frser.c       **** #define S_CMD_SYNCNOP           0x10            /* Special no-operation that returns NAK+ACK    */
+  62:frser.c       **** #define S_CMD_Q_RDNMAXLEN       0x11            /* Query read-n maximum length                  */
+  63:frser.c       **** #define S_CMD_S_BUSTYPE         0x12            /* Set used bustype(s).     */
+  64:frser.c       **** 
+  65:frser.c       **** /* The biggest valid command value */
+  66:frser.c       **** #define S_MAXCMD 				S_CMD_Q_RDNMAXLEN
+  67:frser.c       **** 
+  68:frser.c       **** 
+  69:frser.c       **** #define OPBUF_WRITEOP 0x00
+  70:frser.c       **** #define OPBUF_DELAYOP 0x01
+  71:frser.c       **** 
+  72:frser.c       **** #define RECEIVE()		uart_getc()
+  73:frser.c       **** #define SEND(a)			uart_putc(a)
+  74:frser.c       **** #define UART_BUFLEN		96
+  75:frser.c       **** 
+  76:frser.c       **** static void udelay(unsigned long int usecs) {
+  77:frser.c       **** 	if (usecs < 16) {
+  78:frser.c       **** 		unsigned char i=usecs;
+  79:frser.c       **** 		do { _delay_us(1); } while(--i);
+  80:frser.c       **** 		return;
+  81:frser.c       **** 	}
+  82:frser.c       **** 	usecs >>= 4; // div 16;
+  83:frser.c       **** 	do { _delay_us(16); } while(--usecs);
+  84:frser.c       **** 	return;
+  85:frser.c       **** }
+  86:frser.c       **** 
+  87:frser.c       **** static unsigned char opbuf_addbyte(unsigned char c) {
+ 112               	.LM0:
+ 113               	.LFBB1:
+ 114               	/* prologue: function */
+ 115               	/* frame size = 0 */
+ 116               	/* stack size = 0 */
+ 117               	.L__stack_usage = 0
+  88:frser.c       **** 	if (opbuf_bytes == S_OPBUFLEN) return 1;
+ 119               	.LM1:
+ 120 0000 2091 0000 		lds r18,opbuf_bytes
+ 121 0004 3091 0000 		lds r19,opbuf_bytes+1
+ 122 0008 283C      		cpi r18,-56
+ 123 000a 3105      		cpc r19,__zero_reg__
+ 124 000c 01F0      		breq .L3
+  89:frser.c       **** 	opbuf[opbuf_bytes++] = c;
+ 126               	.LM2:
+ 127 000e A901      		movw r20,r18
+ 128 0010 4F5F      		subi r20,-1
+ 129 0012 5F4F      		sbci r21,-1
+ 130 0014 5093 0000 		sts opbuf_bytes+1,r21
+ 131 0018 4093 0000 		sts opbuf_bytes,r20
+ 132 001c F901      		movw r30,r18
+ 133 001e E050      		subi r30,lo8(-(opbuf))
+ 134 0020 F040      		sbci r31,hi8(-(opbuf))
+ 135 0022 8083      		st Z,r24
+  90:frser.c       **** 	return 0;
+ 137               	.LM3:
+ 138 0024 80E0      		ldi r24,0
+ 139 0026 0895      		ret
+ 140               	.L3:
+  88:frser.c       **** 	if (opbuf_bytes == S_OPBUFLEN) return 1;
+ 142               	.LM4:
+ 143 0028 81E0      		ldi r24,lo8(1)
+  91:frser.c       **** }
+ 145               	.LM5:
+ 146 002a 0895      		ret
+ 148               	.Lscope1:
+ 150               		.stabd	78,0,0
+ 154               	buf2u24:
+ 155               		.stabd	46,0,0
+  92:frser.c       **** 
+  93:frser.c       **** static unsigned long int buf2u24(unsigned char*buf) {
+ 157               	.LM6:
+ 158               	.LFBB2:
+ 159               	/* prologue: function */
+ 160               	/* frame size = 0 */
+ 161               	/* stack size = 0 */
+ 162               	.L__stack_usage = 0
+ 163 002c FC01      		movw r30,r24
+  94:frser.c       **** 	unsigned long int u24;
+  95:frser.c       **** 	u24  = (((unsigned long int)buf[0])<< 0);
+ 165               	.LM7:
+ 166 002e 2081      		ld r18,Z
+  96:frser.c       **** 	u24 |= (((unsigned long int)buf[1])<< 8);
+ 168               	.LM8:
+ 169 0030 3181      		ldd r19,Z+1
+  97:frser.c       **** 	u24 |= (((unsigned long int)buf[2])<<16);
+ 171               	.LM9:
+ 172 0032 6281      		ldd r22,Z+2
+ 173 0034 862F      		mov r24,r22
+ 174 0036 90E0      		ldi r25,0
+ 175 0038 A0E0      		ldi r26,0
+ 176 003a B0E0      		ldi r27,0
+ 177 003c DC01      		movw r26,r24
+ 178 003e 9927      		clr r25
+ 179 0040 8827      		clr r24
+ 180 0042 932B      		or r25,r19
+ 181 0044 BC01      		movw r22,r24
+ 182 0046 CD01      		movw r24,r26
+ 183 0048 622B      		or r22,r18
+  98:frser.c       **** 	return u24;
+  99:frser.c       **** }
+ 185               	.LM10:
+ 186 004a 0895      		ret
+ 188               	.Lscope2:
+ 190               		.stabd	78,0,0
+ 192               	.global	frser_main
+ 194               	frser_main:
+ 195               		.stabd	46,0,0
+ 100:frser.c       **** 
+ 101:frser.c       **** static void do_cmd_readbyte(unsigned char* parbuf) {
+ 102:frser.c       **** 	unsigned char c;
+ 103:frser.c       **** 	unsigned long int addr;
+ 104:frser.c       **** 	addr = buf2u24(parbuf);
+ 105:frser.c       **** 	c = lpc_read(0xfff80000 | addr);
+ 106:frser.c       **** 	SEND(S_ACK);
+ 107:frser.c       **** 	SEND(c);
+ 108:frser.c       **** }
+ 109:frser.c       **** 
+ 110:frser.c       **** static void do_cmd_readnbytes(unsigned char* parbuf) {
+ 111:frser.c       **** 	unsigned long int i,addr,n;
+ 112:frser.c       **** 	addr = buf2u24(parbuf);
+ 113:frser.c       **** 	n = buf2u24(parbuf+3);
+ 114:frser.c       **** 	SEND(S_ACK);
+ 115:frser.c       **** 	for(i=addr;i<(addr+n);i++) {
+ 116:frser.c       **** 		unsigned char c;
+ 117:frser.c       **** 		c = lpc_read(0xfff80000 | i);
+ 118:frser.c       **** 		SEND(c);
+ 119:frser.c       **** 	}
+ 120:frser.c       **** }
+ 121:frser.c       **** 
+ 122:frser.c       **** static void do_cmd_opbuf_writeb(unsigned char* parbuf) {
+ 123:frser.c       **** 	if (opbuf_addbyte(OPBUF_WRITEOP)) goto nakret;
+ 124:frser.c       **** 	if (opbuf_addbyte(1)) goto nakret;
+ 125:frser.c       **** 	if (opbuf_addbyte(parbuf[0])) goto nakret;
+ 126:frser.c       **** 	if (opbuf_addbyte(parbuf[1])) goto nakret;
+ 127:frser.c       **** 	if (opbuf_addbyte(parbuf[2])) goto nakret;
+ 128:frser.c       **** 	if (opbuf_addbyte(parbuf[3])) goto nakret;
+ 129:frser.c       **** 	SEND(S_ACK);
+ 130:frser.c       **** 	return;
+ 131:frser.c       **** nakret:
+ 132:frser.c       **** 	SEND(S_NAK);
+ 133:frser.c       **** 	return;
+ 134:frser.c       **** }
+ 135:frser.c       **** 
+ 136:frser.c       **** 
+ 137:frser.c       **** 
+ 138:frser.c       **** 
+ 139:frser.c       **** static void do_cmd_opbuf_delay(unsigned char* parbuf) {
+ 140:frser.c       **** 	if (opbuf_addbyte(OPBUF_DELAYOP)) goto nakret;
+ 141:frser.c       **** 	if (opbuf_addbyte(parbuf[0])) goto nakret;
+ 142:frser.c       **** 	if (opbuf_addbyte(parbuf[1])) goto nakret;
+ 143:frser.c       **** 	if (opbuf_addbyte(parbuf[2])) goto nakret;
+ 144:frser.c       **** 	if (opbuf_addbyte(parbuf[3])) goto nakret;
+ 145:frser.c       **** 	SEND(S_ACK);
+ 146:frser.c       **** 	return;
+ 147:frser.c       **** nakret:
+ 148:frser.c       **** 	SEND(S_NAK);
+ 149:frser.c       **** 	return;
+ 150:frser.c       **** 	}
+ 151:frser.c       **** 
+ 152:frser.c       **** static void do_cmd_opbuf_writen(void) {
+ 153:frser.c       **** 	unsigned char len;
+ 154:frser.c       **** 	unsigned char plen = 3;
+ 155:frser.c       **** 	unsigned char i;
+ 156:frser.c       **** 	len = RECEIVE();
+ 157:frser.c       **** 	RECEIVE();
+ 158:frser.c       **** 	RECEIVE();
+ 159:frser.c       **** 	if (opbuf_addbyte(OPBUF_WRITEOP)) goto nakret;
+ 160:frser.c       **** 	if (opbuf_addbyte(len)) goto nakret;
+ 161:frser.c       **** 	plen--; if (opbuf_addbyte(RECEIVE())) goto nakret;
+ 162:frser.c       **** 	plen--; if (opbuf_addbyte(RECEIVE())) goto nakret;
+ 163:frser.c       **** 	plen--; if (opbuf_addbyte(RECEIVE())) goto nakret;
+ 164:frser.c       **** 	for(;;) {
+ 165:frser.c       **** 		if (opbuf_addbyte(RECEIVE())) goto nakret;
+ 166:frser.c       **** 		len--;
+ 167:frser.c       **** 		if (len == 0) break;
+ 168:frser.c       **** 	}
+ 169:frser.c       **** 	SEND(S_ACK);
+ 170:frser.c       **** 	return;
+ 171:frser.c       **** 	
+ 172:frser.c       **** nakret:
+ 173:frser.c       **** 	for(i=0;i<plen;i++) RECEIVE();
+ 174:frser.c       **** 	for(i=0;i<len;i++) RECEIVE();
+ 175:frser.c       **** 	SEND(S_NAK);
+ 176:frser.c       **** 	return;
+ 177:frser.c       **** 	
+ 178:frser.c       **** }
+ 179:frser.c       **** 	
+ 180:frser.c       **** static void do_cmd_opbuf_exec(void) {
+ 181:frser.c       **** 	unsigned int readptr;
+ 182:frser.c       **** 	for(readptr=0;readptr<opbuf_bytes;) {
+ 183:frser.c       **** 		unsigned char op;
+ 184:frser.c       **** 		op = opbuf[readptr++];
+ 185:frser.c       **** 		if (readptr >= opbuf_bytes) goto nakret;
+ 186:frser.c       **** 		if (op == OPBUF_WRITEOP) {
+ 187:frser.c       **** 			unsigned long int addr;
+ 188:frser.c       **** 			unsigned char len,i;
+ 189:frser.c       **** 			len = opbuf[readptr++];
+ 190:frser.c       **** 			if (readptr >= opbuf_bytes) goto nakret;
+ 191:frser.c       **** 			addr = buf2u24(opbuf+readptr);
+ 192:frser.c       **** 			readptr += 3;
+ 193:frser.c       **** 			if (readptr >= opbuf_bytes) goto nakret;
+ 194:frser.c       **** 			for(i=0;;) {
+ 195:frser.c       **** 				unsigned char c;
+ 196:frser.c       **** 				c = opbuf[readptr++];
+ 197:frser.c       **** 				if (readptr > opbuf_bytes) goto nakret;
+ 198:frser.c       **** 				lpc_write(0xfff80000 | addr,c);
+ 199:frser.c       **** 				addr++;
+ 200:frser.c       **** 				i++;
+ 201:frser.c       **** 				if (i==len) break;
+ 202:frser.c       **** 			}
+ 203:frser.c       **** 			continue;
+ 204:frser.c       **** 		}
+ 205:frser.c       **** 		if (op == OPBUF_DELAYOP) {
+ 206:frser.c       **** 			unsigned long int usecs;
+ 207:frser.c       **** 			usecs  = (((unsigned long int)(opbuf[readptr++])) << 0);
+ 208:frser.c       **** 			usecs |= (((unsigned long int)(opbuf[readptr++])) << 8);
+ 209:frser.c       **** 			usecs |= (((unsigned long int)(opbuf[readptr++])) << 16);
+ 210:frser.c       **** 			usecs |= (((unsigned long int)(opbuf[readptr++])) << 24);
+ 211:frser.c       **** 			if (readptr > opbuf_bytes) goto nakret;
+ 212:frser.c       **** 			udelay(usecs);
+ 213:frser.c       **** 			continue;
+ 214:frser.c       **** 		}
+ 215:frser.c       **** 		goto nakret;
+ 216:frser.c       **** 	}
+ 217:frser.c       **** 	opbuf_bytes = 0;
+ 218:frser.c       **** 	SEND(S_ACK);
+ 219:frser.c       **** 	return;
+ 220:frser.c       **** nakret:
+ 221:frser.c       **** 	opbuf_bytes = 0;
+ 222:frser.c       **** 	SEND(S_NAK);
+ 223:frser.c       **** 	return;
+ 224:frser.c       **** }
+ 225:frser.c       **** 	
+ 226:frser.c       **** const unsigned char op2len[S_MAXCMD+1] = { /* A table to get  parameter length from opcode if possi
+ 227:frser.c       **** 		0x00, 0x00, 0x00,	/* NOP, iface, bitmap */
+ 228:frser.c       **** 		0x00, 0x00, 0x00,	/* progname, serbufsize, bustypes */
+ 229:frser.c       **** 		0x00, 0x00, 0x00,	/* chipsize, opbufsz, query-n maxlen */
+ 230:frser.c       **** 		0x03, 0x06, 0x00,	/* read byte, read n, init opbuf */
+ 231:frser.c       **** 		0x04, 0x00, 0x04,	/* write byte, write n, write delay */
+ 232:frser.c       **** 		0x00, 0x00, 0x00,	/* Exec opbuf, SYNCNOP, query read maxlen */
+ 233:frser.c       **** 	};
+ 234:frser.c       **** 	
+ 235:frser.c       **** 
+ 236:frser.c       **** void frser_main(void) {
+ 197               	.LM11:
+ 198               	.LFBB3:
+ 199 004c CF93      		push r28
+ 200 004e DF93      		push r29
+ 201 0050 00D0      		rcall .
+ 202 0052 00D0      		rcall .
+ 203 0054 00D0      		rcall .
+ 204 0056 CDB7      		in r28,__SP_L__
+ 205 0058 DEB7      		in r29,__SP_H__
+ 206               	/* prologue: function */
+ 207               	/* frame size = 6 */
+ 208               	/* stack size = 8 */
+ 209               	.L__stack_usage = 8
+ 210               	.LBB32:
+ 237:frser.c       **** 	for(;;) {
+ 238:frser.c       **** 		unsigned char parbuf[S_MAXLEN]; /* Parameter buffer */
+ 239:frser.c       **** 		unsigned char len;
+ 240:frser.c       **** 		unsigned char op;
+ 241:frser.c       **** 		unsigned char i;
+ 242:frser.c       **** 		op = RECEIVE();
+ 243:frser.c       **** 		if (op > S_MAXCMD) {
+ 244:frser.c       **** 			/* This is a pretty futile case as in that we shouldnt get
+ 245:frser.c       **** 			these commands at all with the new supported cmd bitmap system*/
+ 246:frser.c       **** 			SEND(S_NAK);
+ 247:frser.c       **** 			continue;
+ 248:frser.c       **** 		}
+ 249:frser.c       **** 		len = op2len[op];
+ 250:frser.c       **** 		
+ 251:frser.c       **** 		LED_PORT ^= _BV(LED0);
+ 212               	.LM12:
+ 213 005a CC24      		clr r12
+ 214 005c C394      		inc r12
+ 215 005e CE01      		movw r24,r28
+ 216 0060 0196      		adiw r24,1
+ 217 0062 7C01      		movw r14,r24
+ 218 0064 80E0      		ldi r24,lo8(pgmname)
+ 219 0066 90E0      		ldi r25,hi8(pgmname)
+ 220 0068 40E1      		ldi r20,lo8(16)
+ 221 006a D42E      		mov r13,r20
+ 222 006c D80E      		add r13,r24
+ 223               	.L7:
+ 242:frser.c       **** 		if (op > S_MAXCMD) {
+ 225               	.LM13:
+ 226 006e 0E94 0000 		call uart_getc
+ 227 0072 182F      		mov r17,r24
+ 243:frser.c       **** 			/* This is a pretty futile case as in that we shouldnt get
+ 229               	.LM14:
+ 230 0074 8231      		cpi r24,lo8(18)
+ 231 0076 00F0      		brlo .+2
+ 232 0078 00C0      		rjmp .L74
+ 249:frser.c       **** 		
+ 234               	.LM15:
+ 235 007a E82F      		mov r30,r24
+ 236 007c F0E0      		ldi r31,0
+ 237 007e E050      		subi r30,lo8(-(op2len))
+ 238 0080 F040      		sbci r31,hi8(-(op2len))
+ 239 0082 0081      		ld r16,Z
+ 241               	.LM16:
+ 242 0084 85B1      		in r24,0x5
+ 243 0086 8C25      		eor r24,r12
+ 244 0088 85B9      		out 0x5,r24
+ 252:frser.c       **** 		
+ 253:frser.c       **** 		for (i=0;i<len;i++) parbuf[i] = RECEIVE();
+ 246               	.LM17:
+ 247 008a 5701      		movw r10,r14
+ 248               	.L10:
+ 249 008c 8A2D      		mov r24,r10
+ 250 008e 8E19      		sub r24,r14
+ 252               	.LM18:
+ 253 0090 8017      		cp r24,r16
+ 254 0092 00F4      		brsh .L81
+ 256               	.LM19:
+ 257 0094 0E94 0000 		call uart_getc
+ 258 0098 F501      		movw r30,r10
+ 259 009a 8193      		st Z+,r24
+ 260 009c 5F01      		movw r10,r30
+ 261 009e 00C0      		rjmp .L10
+ 262               	.L81:
+ 254:frser.c       **** 		switch (op) {
+ 264               	.LM20:
+ 265 00a0 812F      		mov r24,r17
+ 266 00a2 90E0      		ldi r25,0
+ 267 00a4 FC01      		movw r30,r24
+ 268 00a6 3197      		sbiw r30,1
+ 269 00a8 E131      		cpi r30,17
+ 270 00aa F105      		cpc r31,__zero_reg__
+ 271 00ac 00F0      		brlo .+2
+ 272 00ae 00C0      		rjmp .L75
+ 273 00b0 E050      		subi r30,lo8(-(gs(.L14)))
+ 274 00b2 F040      		sbci r31,hi8(-(gs(.L14)))
+ 275 00b4 0C94 0000 		jmp __tablejump2__
+ 276               		.section	.progmem.gcc_sw_table,"a",@progbits
+ 277               		.p2align	1
+ 278               	.L14:
+ 279 0000 0000      		.word gs(.L13)
+ 280 0002 0000      		.word gs(.L15)
+ 281 0004 0000      		.word gs(.L16)
+ 282 0006 0000      		.word gs(.L17)
+ 283 0008 0000      		.word gs(.L18)
+ 284 000a 0000      		.word gs(.L19)
+ 285 000c 0000      		.word gs(.L20)
+ 286 000e 0000      		.word gs(.L21)
+ 287 0010 0000      		.word gs(.L22)
+ 288 0012 0000      		.word gs(.L23)
+ 289 0014 0000      		.word gs(.L76)
+ 290 0016 0000      		.word gs(.L25)
+ 291 0018 0000      		.word gs(.L26)
+ 292 001a 0000      		.word gs(.L27)
+ 293 001c 0000      		.word gs(.L54)
+ 294 001e 0000      		.word gs(.L29)
+ 295 0020 0000      		.word gs(.L30)
+ 296               		.text
+ 297               	.L29:
+ 255:frser.c       **** 			case S_CMD_NOP:
+ 256:frser.c       **** 				SEND(S_ACK);
+ 257:frser.c       **** 				break;
+ 258:frser.c       **** 			case S_CMD_SYNCNOP:
+ 259:frser.c       **** 				SEND(S_NAK);
+ 299               	.LM21:
+ 300 00b8 85E1      		ldi r24,lo8(21)
+ 301 00ba 0E94 0000 		call uart_putc
+ 302 00be 00C0      		rjmp .L75
+ 303               	.L13:
+ 260:frser.c       **** 				SEND(S_ACK);
+ 261:frser.c       **** 				break;
+ 262:frser.c       **** 			case S_CMD_Q_IFACE:
+ 263:frser.c       **** 				SEND(S_ACK);
+ 305               	.LM22:
+ 306 00c0 86E0      		ldi r24,lo8(6)
+ 307 00c2 00C0      		rjmp .L73
+ 308               	.L15:
+ 264:frser.c       **** 				SEND(0x01);
+ 265:frser.c       **** 				SEND(0x00);
+ 266:frser.c       **** 				break;
+ 267:frser.c       **** 			case S_CMD_Q_CMDMAP: /* a simple map with 2 bytes 0xFF, rest 0 */
+ 268:frser.c       **** 				SEND(S_ACK);
+ 310               	.LM23:
+ 311 00c4 86E0      		ldi r24,lo8(6)
+ 312 00c6 0E94 0000 		call uart_putc
+ 269:frser.c       **** 				SEND(0xFF);
+ 314               	.LM24:
+ 315 00ca 8FEF      		ldi r24,lo8(-1)
+ 316 00cc 0E94 0000 		call uart_putc
+ 270:frser.c       **** 				SEND(0xFF);
+ 318               	.LM25:
+ 319 00d0 8FEF      		ldi r24,lo8(-1)
+ 320 00d2 0E94 0000 		call uart_putc
+ 271:frser.c       **** 				SEND(0x03);
+ 322               	.LM26:
+ 323 00d6 83E0      		ldi r24,lo8(3)
+ 324 00d8 0E94 0000 		call uart_putc
+ 325 00dc 1DE1      		ldi r17,lo8(29)
+ 326               	.L32:
+ 272:frser.c       **** 				for(i=0;i<29;i++) SEND(0x00);
+ 328               	.LM27:
+ 329 00de 80E0      		ldi r24,0
+ 330 00e0 0E94 0000 		call uart_putc
+ 331 00e4 1150      		subi r17,lo8(-(-1))
+ 332 00e6 01F4      		brne .L32
+ 333 00e8 00C0      		rjmp .L7
+ 334               	.L16:
+ 273:frser.c       **** 				break;
+ 274:frser.c       **** 			case S_CMD_Q_PGMNAME:
+ 275:frser.c       **** 				SEND(S_ACK);
+ 336               	.LM28:
+ 337 00ea 86E0      		ldi r24,lo8(6)
+ 338 00ec 0E94 0000 		call uart_putc
+ 339 00f0 00E0      		ldi r16,lo8(pgmname)
+ 340 00f2 10E0      		ldi r17,hi8(pgmname)
+ 341               	.L33:
+ 276:frser.c       **** 				for(i=0;i<16;i++) SEND(pgmname[i]);
+ 343               	.LM29:
+ 344 00f4 F801      		movw r30,r16
+ 345 00f6 8191      		ld r24,Z+
+ 346 00f8 8F01      		movw r16,r30
+ 347 00fa 0E94 0000 		call uart_putc
+ 348 00fe D012      		cpse r13,r16
+ 349 0100 00C0      		rjmp .L33
+ 350 0102 00C0      		rjmp .L7
+ 351               	.L17:
+ 277:frser.c       **** 				break;
+ 278:frser.c       **** 			case S_CMD_Q_SERBUF:
+ 279:frser.c       **** 				SEND(S_ACK);
+ 353               	.LM30:
+ 354 0104 86E0      		ldi r24,lo8(6)
+ 355 0106 0E94 0000 		call uart_putc
+ 280:frser.c       **** 				SEND(UART_BUFLEN&0xFF);
+ 357               	.LM31:
+ 358 010a 80E6      		ldi r24,lo8(96)
+ 359 010c 00C0      		rjmp .L72
+ 360               	.L18:
+ 281:frser.c       **** 				SEND((UART_BUFLEN>>8)&0xFF);
+ 282:frser.c       **** 				break;
+ 283:frser.c       **** 			case S_CMD_Q_BUSTYPE:
+ 284:frser.c       **** 				SEND(S_ACK);
+ 362               	.LM32:
+ 363 010e 86E0      		ldi r24,lo8(6)
+ 364 0110 0E94 0000 		call uart_putc
+ 285:frser.c       **** 				SEND(0x02); /* Only LPC */
+ 366               	.LM33:
+ 367 0114 82E0      		ldi r24,lo8(2)
+ 368 0116 00C0      		rjmp .L71
+ 369               	.L19:
+ 286:frser.c       **** 				break;
+ 287:frser.c       **** 			case S_CMD_Q_CHIPSIZE: /* 512k */
+ 288:frser.c       **** 				SEND(S_ACK);
+ 371               	.LM34:
+ 372 0118 86E0      		ldi r24,lo8(6)
+ 373 011a 0E94 0000 		call uart_putc
+ 289:frser.c       **** 				SEND(19);
+ 375               	.LM35:
+ 376 011e 83E1      		ldi r24,lo8(19)
+ 377 0120 00C0      		rjmp .L71
+ 378               	.L20:
+ 290:frser.c       **** 				break;
+ 291:frser.c       **** 			case S_CMD_Q_OPBUF:
+ 292:frser.c       **** 				SEND(S_ACK);
+ 380               	.LM36:
+ 381 0122 86E0      		ldi r24,lo8(6)
+ 382 0124 0E94 0000 		call uart_putc
+ 293:frser.c       **** 				SEND(S_OPBUFLEN&0xFF);
+ 384               	.LM37:
+ 385 0128 88EC      		ldi r24,lo8(-56)
+ 386 012a 00C0      		rjmp .L72
+ 387               	.L21:
+ 294:frser.c       **** 				SEND((S_OPBUFLEN>>8)&0xFF);
+ 295:frser.c       **** 				break;
+ 296:frser.c       **** 			case S_CMD_Q_WRNMAXLEN: /* 256 bytes */
+ 297:frser.c       **** 				SEND(S_ACK);
+ 389               	.LM38:
+ 390 012c 86E0      		ldi r24,lo8(6)
+ 391 012e 0E94 0000 		call uart_putc
+ 298:frser.c       **** 				SEND(0);
+ 393               	.LM39:
+ 394 0132 80E0      		ldi r24,0
+ 395               	.L73:
+ 396 0134 0E94 0000 		call uart_putc
+ 299:frser.c       **** 				SEND(1);
+ 398               	.LM40:
+ 399 0138 81E0      		ldi r24,lo8(1)
+ 400 013a 00C0      		rjmp .L72
+ 401               	.L22:
+ 402               	.LBB33:
+ 403               	.LBB34:
+ 104:frser.c       **** 	c = lpc_read(0xfff80000 | addr);
+ 405               	.LM41:
+ 406 013c C701      		movw r24,r14
+ 407 013e 0E94 0000 		call buf2u24
+ 105:frser.c       **** 	SEND(S_ACK);
+ 409               	.LM42:
+ 410 0142 886F      		ori r24,248
+ 411 0144 9F6F      		ori r25,255
+ 412 0146 0E94 0000 		call lpc_read
+ 413 014a 182F      		mov r17,r24
+ 106:frser.c       **** 	SEND(c);
+ 415               	.LM43:
+ 416 014c 86E0      		ldi r24,lo8(6)
+ 417 014e 0E94 0000 		call uart_putc
+ 107:frser.c       **** }
+ 419               	.LM44:
+ 420 0152 812F      		mov r24,r17
+ 421 0154 00C0      		rjmp .L71
+ 422               	.L23:
+ 423               	.LBE34:
+ 424               	.LBE33:
+ 425               	.LBB35:
+ 426               	.LBB36:
+ 112:frser.c       **** 	n = buf2u24(parbuf+3);
+ 428               	.LM45:
+ 429 0156 C701      		movw r24,r14
+ 430 0158 0E94 0000 		call buf2u24
+ 431 015c 1B01      		movw r2,r22
+ 432 015e 8C01      		movw r16,r24
+ 113:frser.c       **** 	SEND(S_ACK);
+ 434               	.LM46:
+ 435 0160 CE01      		movw r24,r28
+ 436 0162 0496      		adiw r24,4
+ 437 0164 0E94 0000 		call buf2u24
+ 438 0168 2B01      		movw r4,r22
+ 439 016a 3C01      		movw r6,r24
+ 114:frser.c       **** 	for(i=addr;i<(addr+n);i++) {
+ 441               	.LM47:
+ 442 016c 86E0      		ldi r24,lo8(6)
+ 443 016e 0E94 0000 		call uart_putc
+ 115:frser.c       **** 		unsigned char c;
+ 445               	.LM48:
+ 446 0172 4101      		movw r8,r2
+ 447 0174 5801      		movw r10,r16
+ 448 0176 480C      		add r4,r8
+ 449 0178 591C      		adc r5,r9
+ 450 017a 6A1C      		adc r6,r10
+ 451 017c 7B1C      		adc r7,r11
+ 452               	.L35:
+ 453 017e 8414      		cp r8,r4
+ 454 0180 9504      		cpc r9,r5
+ 455 0182 A604      		cpc r10,r6
+ 456 0184 B704      		cpc r11,r7
+ 457 0186 00F0      		brlo .+2
+ 458 0188 00C0      		rjmp .L7
+ 459               	.LBB37:
+ 117:frser.c       **** 		SEND(c);
+ 461               	.LM49:
+ 462 018a C501      		movw r24,r10
+ 463 018c B401      		movw r22,r8
+ 464 018e 886F      		ori r24,248
+ 465 0190 9F6F      		ori r25,255
+ 466 0192 0E94 0000 		call lpc_read
+ 118:frser.c       **** 	}
+ 468               	.LM50:
+ 469 0196 0E94 0000 		call uart_putc
+ 470               	.LBE37:
+ 115:frser.c       **** 		unsigned char c;
+ 472               	.LM51:
+ 473 019a FFEF      		ldi r31,-1
+ 474 019c 8F1A      		sub r8,r31
+ 475 019e 9F0A      		sbc r9,r31
+ 476 01a0 AF0A      		sbc r10,r31
+ 477 01a2 BF0A      		sbc r11,r31
+ 478 01a4 00C0      		rjmp .L35
+ 479               	.L25:
+ 480               	.LBE36:
+ 481               	.LBE35:
+ 482               	.LBB38:
+ 483               	.LBB39:
+ 123:frser.c       **** 	if (opbuf_addbyte(1)) goto nakret;
+ 485               	.LM52:
+ 486 01a6 80E0      		ldi r24,0
+ 487 01a8 0E94 0000 		call opbuf_addbyte
+ 488 01ac 8111      		cpse r24,__zero_reg__
+ 489 01ae 00C0      		rjmp .L74
+ 490 01b0 00C0      		rjmp .L27
+ 491               	.L26:
+ 492               	.LBE39:
+ 493               	.LBE38:
+ 494               	.LBB40:
+ 495               	.LBB41:
+ 156:frser.c       **** 	RECEIVE();
+ 497               	.LM53:
+ 498 01b2 0E94 0000 		call uart_getc
+ 499 01b6 082F      		mov r16,r24
+ 157:frser.c       **** 	RECEIVE();
+ 501               	.LM54:
+ 502 01b8 0E94 0000 		call uart_getc
+ 158:frser.c       **** 	if (opbuf_addbyte(OPBUF_WRITEOP)) goto nakret;
+ 504               	.LM55:
+ 505 01bc 0E94 0000 		call uart_getc
+ 159:frser.c       **** 	if (opbuf_addbyte(len)) goto nakret;
+ 507               	.LM56:
+ 508 01c0 80E0      		ldi r24,0
+ 509 01c2 0E94 0000 		call opbuf_addbyte
+ 510 01c6 8111      		cpse r24,__zero_reg__
+ 511 01c8 00C0      		rjmp .L56
+ 160:frser.c       **** 	plen--; if (opbuf_addbyte(RECEIVE())) goto nakret;
+ 513               	.LM57:
+ 514 01ca 802F      		mov r24,r16
+ 515 01cc 0E94 0000 		call opbuf_addbyte
+ 516 01d0 8111      		cpse r24,__zero_reg__
+ 517 01d2 00C0      		rjmp .L56
+ 161:frser.c       **** 	plen--; if (opbuf_addbyte(RECEIVE())) goto nakret;
+ 519               	.LM58:
+ 520 01d4 0E94 0000 		call uart_getc
+ 521 01d8 0E94 0000 		call opbuf_addbyte
+ 522 01dc 8111      		cpse r24,__zero_reg__
+ 523 01de 00C0      		rjmp .L57
+ 162:frser.c       **** 	plen--; if (opbuf_addbyte(RECEIVE())) goto nakret;
+ 525               	.LM59:
+ 526 01e0 0E94 0000 		call uart_getc
+ 527 01e4 0E94 0000 		call opbuf_addbyte
+ 528 01e8 8111      		cpse r24,__zero_reg__
+ 529 01ea 00C0      		rjmp .L58
+ 163:frser.c       **** 	for(;;) {
+ 531               	.LM60:
+ 532 01ec 0E94 0000 		call uart_getc
+ 533 01f0 0E94 0000 		call opbuf_addbyte
+ 534 01f4 8111      		cpse r24,__zero_reg__
+ 535 01f6 00C0      		rjmp .L60
+ 536               	.L40:
+ 165:frser.c       **** 		len--;
+ 538               	.LM61:
+ 539 01f8 0E94 0000 		call uart_getc
+ 540 01fc 0E94 0000 		call opbuf_addbyte
+ 541 0200 8111      		cpse r24,__zero_reg__
+ 542 0202 00C0      		rjmp .L60
+ 166:frser.c       **** 		if (len == 0) break;
+ 544               	.LM62:
+ 545 0204 0150      		subi r16,lo8(-(-1))
+ 167:frser.c       **** 	}
+ 547               	.LM63:
+ 548 0206 01F4      		brne .L40
+ 549 0208 00C0      		rjmp .L75
+ 550               	.L56:
+ 154:frser.c       **** 	unsigned char i;
+ 552               	.LM64:
+ 553 020a 13E0      		ldi r17,lo8(3)
+ 554 020c 00C0      		rjmp .L38
+ 555               	.L57:
+ 161:frser.c       **** 	plen--; if (opbuf_addbyte(RECEIVE())) goto nakret;
+ 557               	.LM65:
+ 558 020e 12E0      		ldi r17,lo8(2)
+ 559 0210 00C0      		rjmp .L38
+ 560               	.L58:
+ 162:frser.c       **** 	plen--; if (opbuf_addbyte(RECEIVE())) goto nakret;
+ 562               	.LM66:
+ 563 0212 11E0      		ldi r17,lo8(1)
+ 564 0214 00C0      		rjmp .L38
+ 565               	.L60:
+ 163:frser.c       **** 	for(;;) {
+ 567               	.LM67:
+ 568 0216 10E0      		ldi r17,0
+ 569               	.L38:
+ 173:frser.c       **** 	for(i=0;i<len;i++) RECEIVE();
+ 571               	.LM68:
+ 572 0218 B12C      		mov r11,__zero_reg__
+ 573               	.L41:
+ 574 021a B116      		cp r11,r17
+ 575 021c 01F0      		breq .L82
+ 576 021e 0E94 0000 		call uart_getc
+ 577 0222 B394      		inc r11
+ 578 0224 00C0      		rjmp .L41
+ 579               	.L82:
+ 580 0226 10E0      		ldi r17,0
+ 581               	.L43:
+ 174:frser.c       **** 	SEND(S_NAK);
+ 583               	.LM69:
+ 584 0228 1017      		cp r17,r16
+ 585 022a 01F4      		brne .+2
+ 586 022c 00C0      		rjmp .L74
+ 587 022e 0E94 0000 		call uart_getc
+ 588 0232 1F5F      		subi r17,lo8(-(1))
+ 589 0234 00C0      		rjmp .L43
+ 590               	.L27:
+ 591               	.LBE41:
+ 592               	.LBE40:
+ 593               	.LBB42:
+ 594               	.LBB43:
+ 140:frser.c       **** 	if (opbuf_addbyte(parbuf[0])) goto nakret;
+ 596               	.LM70:
+ 597 0236 81E0      		ldi r24,lo8(1)
+ 598 0238 0E94 0000 		call opbuf_addbyte
+ 599 023c 8111      		cpse r24,__zero_reg__
+ 600 023e 00C0      		rjmp .L74
+ 141:frser.c       **** 	if (opbuf_addbyte(parbuf[1])) goto nakret;
+ 602               	.LM71:
+ 603 0240 8981      		ldd r24,Y+1
+ 604 0242 0E94 0000 		call opbuf_addbyte
+ 605 0246 8111      		cpse r24,__zero_reg__
+ 606 0248 00C0      		rjmp .L74
+ 142:frser.c       **** 	if (opbuf_addbyte(parbuf[2])) goto nakret;
+ 608               	.LM72:
+ 609 024a 8A81      		ldd r24,Y+2
+ 610 024c 0E94 0000 		call opbuf_addbyte
+ 611 0250 8111      		cpse r24,__zero_reg__
+ 612 0252 00C0      		rjmp .L74
+ 143:frser.c       **** 	if (opbuf_addbyte(parbuf[3])) goto nakret;
+ 614               	.LM73:
+ 615 0254 8B81      		ldd r24,Y+3
+ 616 0256 0E94 0000 		call opbuf_addbyte
+ 617 025a 8111      		cpse r24,__zero_reg__
+ 618 025c 00C0      		rjmp .L74
+ 144:frser.c       **** 	SEND(S_ACK);
+ 620               	.LM74:
+ 621 025e 8C81      		ldd r24,Y+4
+ 622 0260 0E94 0000 		call opbuf_addbyte
+ 623 0264 8111      		cpse r24,__zero_reg__
+ 624 0266 00C0      		rjmp .L74
+ 625 0268 00C0      		rjmp .L75
+ 626               	.L54:
+ 627               	.LBE43:
+ 628               	.LBE42:
+ 254:frser.c       **** 			case S_CMD_NOP:
+ 630               	.LM75:
+ 631 026a 00E0      		ldi r16,0
+ 632 026c 10E0      		ldi r17,0
+ 633               	.L28:
+ 634               	.LBB44:
+ 635               	.LBB45:
+ 182:frser.c       **** 		unsigned char op;
+ 637               	.LM76:
+ 638 026e A090 0000 		lds r10,opbuf_bytes
+ 639 0272 B090 0000 		lds r11,opbuf_bytes+1
+ 640 0276 0A15      		cp r16,r10
+ 641 0278 1B05      		cpc r17,r11
+ 642 027a 00F0      		brlo .+2
+ 643 027c 00C0      		rjmp .L76
+ 644               	.LBB46:
+ 184:frser.c       **** 		if (readptr >= opbuf_bytes) goto nakret;
+ 646               	.LM77:
+ 647 027e 9801      		movw r18,r16
+ 648 0280 2F5F      		subi r18,-1
+ 649 0282 3F4F      		sbci r19,-1
+ 650 0284 D801      		movw r26,r16
+ 651 0286 A050      		subi r26,lo8(-(opbuf))
+ 652 0288 B040      		sbci r27,hi8(-(opbuf))
+ 653 028a 8C91      		ld r24,X
+ 185:frser.c       **** 		if (op == OPBUF_WRITEOP) {
+ 655               	.LM78:
+ 656 028c 2A15      		cp r18,r10
+ 657 028e 3B05      		cpc r19,r11
+ 658 0290 00F0      		brlo .+2
+ 659 0292 00C0      		rjmp .L46
+ 186:frser.c       **** 			unsigned long int addr;
+ 661               	.LM79:
+ 662 0294 8111      		cpse r24,__zero_reg__
+ 663 0296 00C0      		rjmp .L47
+ 664               	.LBB47:
+ 189:frser.c       **** 			if (readptr >= opbuf_bytes) goto nakret;
+ 666               	.LM80:
+ 667 0298 C801      		movw r24,r16
+ 668 029a 0296      		adiw r24,2
+ 669 029c F901      		movw r30,r18
+ 670 029e E050      		subi r30,lo8(-(opbuf))
+ 671 02a0 F040      		sbci r31,hi8(-(opbuf))
+ 672 02a2 6080      		ld r6,Z
+ 190:frser.c       **** 			addr = buf2u24(opbuf+readptr);
+ 674               	.LM81:
+ 675 02a4 8A15      		cp r24,r10
+ 676 02a6 9B05      		cpc r25,r11
+ 677 02a8 00F0      		brlo .+2
+ 678 02aa 00C0      		rjmp .L46
+ 191:frser.c       **** 			readptr += 3;
+ 680               	.LM82:
+ 681 02ac 8050      		subi r24,lo8(-(opbuf))
+ 682 02ae 9040      		sbci r25,hi8(-(opbuf))
+ 683 02b0 0E94 0000 		call buf2u24
+ 684 02b4 762E      		mov r7,r22
+ 192:frser.c       **** 			if (readptr >= opbuf_bytes) goto nakret;
+ 686               	.LM83:
+ 687 02b6 9801      		movw r18,r16
+ 688 02b8 2B5F      		subi r18,-5
+ 689 02ba 3F4F      		sbci r19,-1
+ 193:frser.c       **** 			for(i=0;;) {
+ 691               	.LM84:
+ 692 02bc 2A15      		cp r18,r10
+ 693 02be 3B05      		cpc r19,r11
+ 694 02c0 00F0      		brlo .+2
+ 695 02c2 00C0      		rjmp .L46
+ 696 02c4 862E      		mov r8,r22
+ 697 02c6 972E      		mov r9,r23
+ 698 02c8 5C01      		movw r10,r24
+ 699               	.L49:
+ 700               	.LBB48:
+ 196:frser.c       **** 				if (readptr > opbuf_bytes) goto nakret;
+ 702               	.LM85:
+ 703 02ca 8901      		movw r16,r18
+ 704 02cc 0F5F      		subi r16,-1
+ 705 02ce 1F4F      		sbci r17,-1
+ 706 02d0 F901      		movw r30,r18
+ 707 02d2 E050      		subi r30,lo8(-(opbuf))
+ 708 02d4 F040      		sbci r31,hi8(-(opbuf))
+ 709 02d6 4081      		ld r20,Z
+ 197:frser.c       **** 				lpc_write(0xfff80000 | addr,c);
+ 711               	.LM86:
+ 712 02d8 8091 0000 		lds r24,opbuf_bytes
+ 713 02dc 9091 0000 		lds r25,opbuf_bytes+1
+ 714 02e0 8017      		cp r24,r16
+ 715 02e2 9107      		cpc r25,r17
+ 716 02e4 00F4      		brsh .+2
+ 717 02e6 00C0      		rjmp .L46
+ 198:frser.c       **** 				addr++;
+ 719               	.LM87:
+ 720 02e8 C501      		movw r24,r10
+ 721 02ea B401      		movw r22,r8
+ 722 02ec 886F      		ori r24,248
+ 723 02ee 9F6F      		ori r25,255
+ 724 02f0 0E94 0000 		call lpc_write
+ 199:frser.c       **** 				i++;
+ 726               	.LM88:
+ 727 02f4 8FEF      		ldi r24,-1
+ 728 02f6 881A      		sub r8,r24
+ 729 02f8 980A      		sbc r9,r24
+ 730 02fa A80A      		sbc r10,r24
+ 731 02fc B80A      		sbc r11,r24
+ 732 02fe 9801      		movw r18,r16
+ 733 0300 882D      		mov r24,r8
+ 734 0302 8719      		sub r24,r7
+ 201:frser.c       **** 			}
+ 736               	.LM89:
+ 737 0304 8611      		cpse r24,r6
+ 738 0306 00C0      		rjmp .L49
+ 739 0308 00C0      		rjmp .L28
+ 740               	.L47:
+ 741               	.LBE48:
+ 742               	.LBE47:
+ 205:frser.c       **** 			unsigned long int usecs;
+ 744               	.LM90:
+ 745 030a 8130      		cpi r24,lo8(1)
+ 746 030c 01F0      		breq .+2
+ 747 030e 00C0      		rjmp .L46
+ 748               	.LBB49:
+ 207:frser.c       **** 			usecs |= (((unsigned long int)(opbuf[readptr++])) << 8);
+ 750               	.LM91:
+ 751 0310 F901      		movw r30,r18
+ 752 0312 E050      		subi r30,lo8(-(opbuf))
+ 753 0314 F040      		sbci r31,hi8(-(opbuf))
+ 754 0316 9081      		ld r25,Z
+ 208:frser.c       **** 			usecs |= (((unsigned long int)(opbuf[readptr++])) << 16);
+ 756               	.LM92:
+ 757 0318 1296      		adiw r26,2
+ 758 031a 8C91      		ld r24,X
+ 759 031c 1297      		sbiw r26,2
+ 209:frser.c       **** 			usecs |= (((unsigned long int)(opbuf[readptr++])) << 24);
+ 761               	.LM93:
+ 762 031e F801      		movw r30,r16
+ 763 0320 3496      		adiw r30,4
+ 764 0322 1396      		adiw r26,3
+ 765 0324 4C91      		ld r20,X
+ 210:frser.c       **** 			if (readptr > opbuf_bytes) goto nakret;
+ 767               	.LM94:
+ 768 0326 0B5F      		subi r16,-5
+ 769 0328 1F4F      		sbci r17,-1
+ 770 032a E050      		subi r30,lo8(-(opbuf))
+ 771 032c F040      		sbci r31,hi8(-(opbuf))
+ 772 032e 2081      		ld r18,Z
+ 211:frser.c       **** 			udelay(usecs);
+ 774               	.LM95:
+ 775 0330 A016      		cp r10,r16
+ 776 0332 B106      		cpc r11,r17
+ 777 0334 00F0      		brlo .L46
+ 209:frser.c       **** 			usecs |= (((unsigned long int)(opbuf[readptr++])) << 24);
+ 779               	.LM96:
+ 780 0336 50E0      		ldi r21,0
+ 781 0338 60E0      		ldi r22,0
+ 782 033a 70E0      		ldi r23,0
+ 783 033c BA01      		movw r22,r20
+ 784 033e 5527      		clr r21
+ 785 0340 4427      		clr r20
+ 786 0342 722B      		or r23,r18
+ 787 0344 492B      		or r20,r25
+ 210:frser.c       **** 			if (readptr > opbuf_bytes) goto nakret;
+ 789               	.LM97:
+ 790 0346 582B      		or r21,r24
+ 791               	.LBB50:
+ 792               	.LBB51:
+  77:frser.c       **** 		unsigned char i=usecs;
+ 794               	.LM98:
+ 795 0348 4031      		cpi r20,16
+ 796 034a 5105      		cpc r21,__zero_reg__
+ 797 034c 6105      		cpc r22,__zero_reg__
+ 798 034e 7105      		cpc r23,__zero_reg__
+ 799 0350 00F4      		brsh .L50
+ 800               	.L51:
+ 801               	.LBB52:
+ 802               	.LBB53:
+ 803               	.LBB54:
+ 805               	.Ltext1:
+   1:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** /* Copyright (c) 2002, Marek Michalkiewicz
+   2:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Copyright (c) 2004,2005,2007 Joerg Wunsch
+   3:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Copyright (c) 2007  Florin-Viorel Petrov
+   4:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    All rights reserved.
+   5:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+   6:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Redistribution and use in source and binary forms, with or without
+   7:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    modification, are permitted provided that the following conditions are met:
+   8:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+   9:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    * Redistributions of source code must retain the above copyright
+  10:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****      notice, this list of conditions and the following disclaimer.
+  11:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  12:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    * Redistributions in binary form must reproduce the above copyright
+  13:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****      notice, this list of conditions and the following disclaimer in
+  14:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****      the documentation and/or other materials provided with the
+  15:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****      distribution.
+  16:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  17:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    * Neither the name of the copyright holders nor the names of
+  18:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****      contributors may be used to endorse or promote products derived
+  19:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****      from this software without specific prior written permission.
+  20:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  21:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  22:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  23:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  24:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+  25:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  26:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  27:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  28:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  29:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  30:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  31:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   POSSIBILITY OF SUCH DAMAGE. */
+  32:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  33:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** /* $Id: delay.h.in 2385 2013-05-03 13:14:20Z joerg_wunsch $ */
+  34:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  35:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #ifndef _UTIL_DELAY_H_
+  36:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #define _UTIL_DELAY_H_ 1
+  37:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  38:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #ifndef __HAS_DELAY_CYCLES
+  39:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #define __HAS_DELAY_CYCLES 1
+  40:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #endif
+  41:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  42:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #include <inttypes.h>
+  43:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #include <util/delay_basic.h>
+  44:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #include <math.h>
+  45:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  46:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** /** \file */
+  47:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** /** \defgroup util_delay <util/delay.h>: Convenience functions for busy-wait delay loops
+  48:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     \code
+  49:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     #define F_CPU 1000000UL  // 1 MHz
+  50:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     //#define F_CPU 14.7456E6
+  51:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     #include <util/delay.h>
+  52:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     \endcode
+  53:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  54:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     \note As an alternative method, it is possible to pass the
+  55:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     F_CPU macro down to the compiler from the Makefile.
+  56:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     Obviously, in that case, no \c \#define statement should be
+  57:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     used.
+  58:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  59:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     The functions in this header file are wrappers around the basic
+  60:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     busy-wait functions from <util/delay_basic.h>.  They are meant as
+  61:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     convenience functions where actual time values can be specified
+  62:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     rather than a number of cycles to wait for.  The idea behind is
+  63:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     that compile-time constant expressions will be eliminated by
+  64:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     compiler optimization so floating-point expressions can be used
+  65:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     to calculate the number of delay cycles needed based on the CPU
+  66:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     frequency passed by the macro F_CPU.
+  67:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  68:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     \note In order for these functions to work as intended, compiler
+  69:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     optimizations <em>must</em> be enabled, and the delay time
+  70:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     <em>must</em> be an expression that is a known constant at
+  71:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     compile-time.  If these requirements are not met, the resulting
+  72:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     delay will be much longer (and basically unpredictable), and
+  73:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     applications that otherwise do not use floating-point calculations
+  74:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     will experience severe code bloat by the floating-point library
+  75:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     routines linked into the application.
+  76:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  77:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     The functions available allow the specification of microsecond, and
+  78:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     millisecond delays directly, using the application-supplied macro
+  79:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     F_CPU as the CPU clock frequency (in Hertz).
+  80:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  81:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** */
+  82:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  83:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #if !defined(__DOXYGEN__)
+  84:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** static inline void _delay_us(double __us) __attribute__((always_inline));
+  85:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** static inline void _delay_ms(double __ms) __attribute__((always_inline));
+  86:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #endif
+  87:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  88:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #ifndef F_CPU
+  89:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** /* prevent compiler error by supplying a default */
+  90:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** # warning "F_CPU not defined for <util/delay.h>"
+  91:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** # define F_CPU 1000000UL
+  92:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #endif
+  93:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  94:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #ifndef __OPTIMIZE__
+  95:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** # warning "Compiler optimizations disabled; functions from <util/delay.h> won't work as designed"
+  96:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #endif
+  97:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+  98:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #if __HAS_DELAY_CYCLES && defined(__OPTIMIZE__) && \
+  99:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   !defined(__DELAY_BACKWARD_COMPATIBLE__) &&	   \
+ 100:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   __STDC_HOSTED__
+ 101:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #  include <math.h>
+ 102:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #endif
+ 103:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 104:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** /**
+ 105:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    \ingroup util_delay
+ 106:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 107:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Perform a delay of \c __ms milliseconds, using _delay_loop_2().
+ 108:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 109:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    The macro F_CPU is supposed to be defined to a
+ 110:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    constant defining the CPU clock frequency (in Hertz).
+ 111:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 112:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    The maximal possible delay is 262.14 ms / F_CPU in MHz.
+ 113:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 114:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    When the user request delay which exceed the maximum possible one,
+ 115:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    _delay_ms() provides a decreased resolution functionality. In this
+ 116:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    mode _delay_ms() will work with a resolution of 1/10 ms, providing
+ 117:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    delays up to 6.5535 seconds (independent from CPU frequency).  The
+ 118:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    user will not be informed about decreased resolution.
+ 119:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 120:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    If the avr-gcc toolchain has __builtin_avr_delay_cycles(unsigned long)
+ 121:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    support, maximal possible delay is 4294967.295 ms/ F_CPU in MHz. For
+ 122:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    values greater than the maximal possible delay, overflows results in
+ 123:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    no delay i.e., 0ms.
+ 124:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 125:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Conversion of __us into clock cycles may not always result in integer.
+ 126:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    By default, the clock cycles rounded up to next integer. This ensures that
+ 127:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    the user gets atleast __us microseconds of delay.
+ 128:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 129:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Alternatively, user can define __DELAY_ROUND_DOWN__ and __DELAY_ROUND_CLOSEST__
+ 130:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    to round down and round to closest integer.
+ 131:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 132:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Note: The new implementation of _delay_ms(double __ms) with 
+ 133:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     __builtin_avr_delay_cycles(unsigned long) support is not backward compatible. 
+ 134:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    User can define __DELAY_BACKWARD_COMPATIBLE__ to get a backward compatible delay.
+ 135:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Also, the backward compatible
+ 136:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    algorithm will be chosen if the code is compiled in a <em>freestanding
+ 137:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    environment</em> (GCC option \c -ffreestanding), as the math functions
+ 138:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    required for rounding are not available to the compiler then.
+ 139:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 140:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****  */
+ 141:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** void
+ 142:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** _delay_ms(double __ms)
+ 143:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** {
+ 144:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	double __tmp ; 
+ 145:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #if __HAS_DELAY_CYCLES && defined(__OPTIMIZE__) && \
+ 146:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   !defined(__DELAY_BACKWARD_COMPATIBLE__) &&	   \
+ 147:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   __STDC_HOSTED__
+ 148:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	uint32_t __ticks_dc;
+ 149:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	extern void __builtin_avr_delay_cycles(unsigned long);
+ 150:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	__tmp = ((F_CPU) / 1e3) * __ms;
+ 151:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 152:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	#if defined(__DELAY_ROUND_DOWN__)
+ 153:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		__ticks_dc = (uint32_t)fabs(__tmp);
+ 154:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 155:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	#elif defined(__DELAY_ROUND_CLOSEST__)
+ 156:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		__ticks_dc = (uint32_t)(fabs(__tmp)+0.5);
+ 157:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 158:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	#else
+ 159:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		//round up by default
+ 160:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		__ticks_dc = (uint32_t)(ceil(fabs(__tmp)));
+ 161:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	#endif
+ 162:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 163:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	__builtin_avr_delay_cycles(__ticks_dc);
+ 164:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 165:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #else
+ 166:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	uint16_t __ticks;
+ 167:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	__tmp = ((F_CPU) / 4e3) * __ms;
+ 168:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	if (__tmp < 1.0)
+ 169:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		__ticks = 1;
+ 170:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	else if (__tmp > 65535)
+ 171:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	{
+ 172:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		//	__ticks = requested delay in 1/10 ms
+ 173:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		__ticks = (uint16_t) (__ms * 10.0);
+ 174:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		while(__ticks)
+ 175:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		{
+ 176:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 			// wait 1/10 ms
+ 177:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 			_delay_loop_2(((F_CPU) / 4e3) / 10);
+ 178:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 			__ticks --;
+ 179:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		}
+ 180:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		return;
+ 181:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	}
+ 182:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	else
+ 183:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		__ticks = (uint16_t)__tmp;
+ 184:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	_delay_loop_2(__ticks);
+ 185:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #endif
+ 186:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** }
+ 187:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 188:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** /**
+ 189:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    \ingroup util_delay
+ 190:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 191:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Perform a delay of \c __us microseconds, using _delay_loop_1().
+ 192:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 193:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    The macro F_CPU is supposed to be defined to a
+ 194:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    constant defining the CPU clock frequency (in Hertz).
+ 195:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 196:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    The maximal possible delay is 768 us / F_CPU in MHz.
+ 197:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 198:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    If the user requests a delay greater than the maximal possible one,
+ 199:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    _delay_us() will automatically call _delay_ms() instead.  The user
+ 200:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    will not be informed about this case.
+ 201:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 202:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    If the avr-gcc toolchain has __builtin_avr_delay_cycles(unsigned long)
+ 203:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    support, maximal possible delay is 4294967.295 us/ F_CPU in MHz. For
+ 204:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    values greater than the maximal possible delay, overflow results in
+ 205:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    no delay i.e., 0us.
+ 206:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   
+ 207:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Conversion of __us into clock cycles may not always result in integer.
+ 208:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    By default, the clock cycles rounded up to next integer. This ensures that
+ 209:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    the user gets atleast __us microseconds of delay.
+ 210:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 211:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Alternatively, user can define __DELAY_ROUND_DOWN__ and __DELAY_ROUND_CLOSEST__
+ 212:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    to round down and round to closest integer.
+ 213:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****  
+ 214:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Note: The new implementation of _delay_us(double __us) with 
+ 215:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****     __builtin_avr_delay_cycles(unsigned long) support is not backward compatible.
+ 216:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    User can define __DELAY_BACKWARD_COMPATIBLE__ to get a backward compatible delay.
+ 217:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    Also, the backward compatible
+ 218:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    algorithm will be chosen if the code is compiled in a <em>freestanding
+ 219:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    environment</em> (GCC option \c -ffreestanding), as the math functions
+ 220:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****    required for rounding are not available to the compiler then.
+ 221:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 222:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****  */
+ 223:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** void
+ 224:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** _delay_us(double __us)
+ 225:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** {
+ 226:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	double __tmp ; 
+ 227:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** #if __HAS_DELAY_CYCLES && defined(__OPTIMIZE__) && \
+ 228:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   !defined(__DELAY_BACKWARD_COMPATIBLE__) &&	   \
+ 229:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h ****   __STDC_HOSTED__
+ 230:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	uint32_t __ticks_dc;
+ 231:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	extern void __builtin_avr_delay_cycles(unsigned long);
+ 232:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	__tmp = ((F_CPU) / 1e6) * __us;
+ 233:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 234:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	#if defined(__DELAY_ROUND_DOWN__)
+ 235:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		__ticks_dc = (uint32_t)fabs(__tmp);
+ 236:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 237:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	#elif defined(__DELAY_ROUND_CLOSEST__)
+ 238:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		__ticks_dc = (uint32_t)(fabs(__tmp)+0.5);
+ 239:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 240:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	#else
+ 241:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		//round up by default
+ 242:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 		__ticks_dc = (uint32_t)(ceil(fabs(__tmp)));
+ 243:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	#endif
+ 244:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 
+ 245:/usr/local/Cellar/avr-gcc/4.9.2/avr/include/util/delay.h **** 	__builtin_avr_delay_cycles(__ticks_dc);
+ 807               	.LM99:
+ 808 0352 95E0      		ldi r25,lo8(5)
+ 809 0354 9A95      		1: dec r25
+ 810 0356 01F4      		brne 1b
+ 811 0358 0000      		nop
+ 812               	.LBE54:
+ 813               	.LBE53:
+ 815               	.Ltext2:
+  79:frser.c       **** 		return;
+ 817               	.LM100:
+ 818 035a 4150      		subi r20,lo8(-(-1))
+ 819 035c 01F4      		brne .L51
+ 820 035e 00C0      		rjmp .L28
+ 821               	.L50:
+ 822               	.LBE52:
+  82:frser.c       **** 	do { _delay_us(16); } while(--usecs);
+ 824               	.LM101:
+ 825 0360 84E0      		ldi r24,4
+ 826               		1:
+ 827 0362 7695      		lsr r23
+ 828 0364 6795      		ror r22
+ 829 0366 5795      		ror r21
+ 830 0368 4795      		ror r20
+ 831 036a 8A95      		dec r24
+ 832 036c 01F4      		brne 1b
+ 833               	.L52:
+ 834               	.LBB55:
+ 835               	.LBB56:
+ 837               	.Ltext3:
+ 839               	.LM102:
+ 840 036e E5E5      		ldi r30,lo8(85)
+ 841 0370 EA95      		1: dec r30
+ 842 0372 01F4      		brne 1b
+ 843 0374 0000      		nop
+ 844               	.LBE56:
+ 845               	.LBE55:
+ 847               	.Ltext4:
+  83:frser.c       **** 	return;
+ 849               	.LM103:
+ 850 0376 4150      		subi r20,1
+ 851 0378 5109      		sbc r21,__zero_reg__
+ 852 037a 6109      		sbc r22,__zero_reg__
+ 853 037c 7109      		sbc r23,__zero_reg__
+ 854 037e 01F4      		brne .L52
+ 855 0380 00C0      		rjmp .L28
+ 856               	.L76:
+ 857               	.LBE51:
+ 858               	.LBE50:
+ 859               	.LBE49:
+ 860               	.LBE46:
+ 217:frser.c       **** 	SEND(S_ACK);
+ 862               	.LM104:
+ 863 0382 1092 0000 		sts opbuf_bytes+1,__zero_reg__
+ 864 0386 1092 0000 		sts opbuf_bytes,__zero_reg__
+ 865               	.L75:
+ 218:frser.c       **** 	return;
+ 867               	.LM105:
+ 868 038a 86E0      		ldi r24,lo8(6)
+ 869 038c 00C0      		rjmp .L71
+ 870               	.L46:
+ 221:frser.c       **** 	SEND(S_NAK);
+ 872               	.LM106:
+ 873 038e 1092 0000 		sts opbuf_bytes+1,__zero_reg__
+ 874 0392 1092 0000 		sts opbuf_bytes,__zero_reg__
+ 875               	.L74:
+ 222:frser.c       **** 	return;
+ 877               	.LM107:
+ 878 0396 85E1      		ldi r24,lo8(21)
+ 879 0398 00C0      		rjmp .L71
+ 880               	.L30:
+ 881               	.LBE45:
+ 882               	.LBE44:
+ 300:frser.c       **** 				SEND(0);
+ 301:frser.c       **** 				break;
+ 302:frser.c       **** 			case S_CMD_R_BYTE:
+ 303:frser.c       **** 				do_cmd_readbyte(parbuf);
+ 304:frser.c       **** 				break;
+ 305:frser.c       **** 			case S_CMD_R_NBYTES:
+ 306:frser.c       **** 				do_cmd_readnbytes(parbuf);
+ 307:frser.c       **** 				break;
+ 308:frser.c       **** 			case S_CMD_O_INIT:
+ 309:frser.c       **** 				opbuf_bytes = 0;
+ 310:frser.c       **** 				SEND(S_ACK);
+ 311:frser.c       **** 				break;
+ 312:frser.c       **** 			case S_CMD_O_WRITEB:
+ 313:frser.c       **** 				do_cmd_opbuf_writeb(parbuf);
+ 314:frser.c       **** 				break;
+ 315:frser.c       **** 			case S_CMD_O_WRITEN:
+ 316:frser.c       **** 				do_cmd_opbuf_writen();
+ 317:frser.c       **** 				break;
+ 318:frser.c       **** 			case S_CMD_O_DELAY:
+ 319:frser.c       **** 				do_cmd_opbuf_delay(parbuf);
+ 320:frser.c       **** 				break;
+ 321:frser.c       **** 			case S_CMD_O_EXEC:
+ 322:frser.c       **** 				do_cmd_opbuf_exec();
+ 323:frser.c       **** 				break;
+ 324:frser.c       **** 			case S_CMD_Q_RDNMAXLEN: /* unlimited */
+ 325:frser.c       **** 				SEND(S_ACK);
+ 884               	.LM108:
+ 885 039a 86E0      		ldi r24,lo8(6)
+ 886 039c 0E94 0000 		call uart_putc
+ 326:frser.c       **** 				SEND(0);
+ 888               	.LM109:
+ 889 03a0 80E0      		ldi r24,0
+ 890 03a2 0E94 0000 		call uart_putc
+ 327:frser.c       **** 				SEND(0);
+ 892               	.LM110:
+ 893 03a6 80E0      		ldi r24,0
+ 894               	.L72:
+ 895 03a8 0E94 0000 		call uart_putc
+ 328:frser.c       **** 				SEND(0);
+ 897               	.LM111:
+ 898 03ac 80E0      		ldi r24,0
+ 899               	.L71:
+ 900 03ae 0E94 0000 		call uart_putc
+ 329:frser.c       **** 				break;
+ 902               	.LM112:
+ 903 03b2 00C0      		rjmp .L7
+ 904               	.LBE32:
+ 937               	.Lscope3:
+ 939               		.stabd	78,0,0
+ 940               	.global	op2len
+ 941               		.section	.rodata
+ 944               	op2len:
+ 945 0000 00        		.byte	0
+ 946 0001 00        		.byte	0
+ 947 0002 00        		.byte	0
+ 948 0003 00        		.byte	0
+ 949 0004 00        		.byte	0
+ 950 0005 00        		.byte	0
+ 951 0006 00        		.byte	0
+ 952 0007 00        		.byte	0
+ 953 0008 00        		.byte	0
+ 954 0009 03        		.byte	3
+ 955 000a 06        		.byte	6
+ 956 000b 00        		.byte	0
+ 957 000c 04        		.byte	4
+ 958 000d 00        		.byte	0
+ 959 000e 04        		.byte	4
+ 960 000f 00        		.byte	0
+ 961 0010 00        		.byte	0
+ 962 0011 00        		.byte	0
+ 963               		.local	opbuf_bytes
+ 964               		.comm	opbuf_bytes,2,1
+ 965               		.local	opbuf
+ 966               		.comm	opbuf,200,1
+ 967               	.global	pgmname
+ 970               	pgmname:
+ 971 0012 4154 4D65 		.string	"ATMega88 LPC   "
+ 971      6761 3838 
+ 971      204C 5043 
+ 971      2020 2000 
+ 976               		.text
+ 978               	.Letext0:
+ 979               		.ident	"GCC: (GNU) 4.9.2"
+ 980               	.global __do_copy_data
+ 981               	.global __do_clear_bss
+DEFINED SYMBOLS
+                            *ABS*:0000000000000000 frser.c
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:2      *ABS*:000000000000003e __SP_H__
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:3      *ABS*:000000000000003d __SP_L__
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:4      *ABS*:000000000000003f __SREG__
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:5      *ABS*:0000000000000000 __tmp_reg__
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:6      *ABS*:0000000000000001 __zero_reg__
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:109    .text:0000000000000000 opbuf_addbyte
+                             .bss:0000000000000000 opbuf_bytes
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:964    .bss:0000000000000002 opbuf
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:154    .text:000000000000002c buf2u24
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:194    .text:000000000000004c frser_main
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:970    .rodata:0000000000000012 pgmname
+/var/folders/rg/7f3yqwg10fgcvvw7zpv9kx780000gp/T//ccoBPdOd.s:944    .rodata:0000000000000000 op2len
+
+UNDEFINED SYMBOLS
+uart_getc
+__tablejump2__
+uart_putc
+lpc_read
+lpc_write
+__do_copy_data
+__do_clear_bss
